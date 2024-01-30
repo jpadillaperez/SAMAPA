@@ -1,0 +1,7 @@
+wandb/*
+output/*
+wandb_api_key.txt
+*.err
+*.out
+*.pyc
+*.gif
