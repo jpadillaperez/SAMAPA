@@ -1,7 +1,8 @@
 train_config = {
         "model_name":   "SAMAPAUNet",
         "dataset":      "ImageCAS",
-        "data_path":    "/home/guests/jorge_padilla/data/HepaticVessel/Task08_HepaticVessel", 
+        #"data_path":    "/home/guests/jorge_padilla/data/HepaticVessel/Task08_HepaticVessel", 
+        "data_path":    "/home/guests/jorge_padilla/data/ImageCAS/preprocessed",
         "scheduler":    "MultiStepLR",
         "criterion":    "Dice",
         "optimizer":    "Adam",
@@ -17,7 +18,7 @@ train_config = {
         "label_value":  1,
         "debugging_mode": {
                 "active":        True,
-                "data_path":    "/home/guests/jorge_padilla/data/HepaticVessel/Task08_HepaticVessel",
+                "data_path":    "/home/guests/jorge_padilla/data/ImageCAS/preprocessed",
                 "epochs": 30,
                 "val_interval": 10,
                 },

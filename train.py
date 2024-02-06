@@ -12,6 +12,7 @@ from trainer import Trainer
 from utils.config import train_config
 from utils.losses import DiceLoss, DiceFocalLoss, DiceLossWeighted, DiceCELoss, BinaryFocalLoss
 import torchvision.transforms as transforms
+from torch.utils.data import DataLoader, random_split
 
 def main():    
     # ------- Check if cuda is available --------
@@ -31,31 +32,31 @@ def main():
 
     # -------- Set debugging mode --------
     if train_config["debugging_mode"]["active"]:
-        assert train_config["debugging_mode"]["data_raw_path"] is not None, "Debugging mode is on, but no debugging data path is given."
-        train_config["data_raw_path"] = train_config["debugging_mode"]["data_raw_path"]
+        assert train_config["debugging_mode"]["data_path"] is not None, "Debugging mode is on, but no debugging data path is given."
+        train_config["data_path"] = train_config["debugging_mode"]["data_path"]
         train_config["epochs"] = train_config["debugging_mode"]["epochs"]
         train_config["val_interval"] = train_config["debugging_mode"]["val_interval"]
-        print("Changed configuration to debugging mode... Ignoring val_num, epochs and using debug_path as data_raw_path")
+        print("Changed configuration to debugging mode... Ignoring val_num, epochs and using debug_path as data_path")
 
     #-------- Initialize Weights and Biases --------
     wandb.init(project="SAMAPAUNet", config=train_config)
 
     # -------- Load data --------
     if train_config["dataset"] == 'ImageCAS':
-        train_dataset = ImageCASDataset(data_path=train_config["data_raw_path"], mode="train")
+        train_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="train")
         train_dataset, val_dataset = random_split(train_dataset, [int(0.8 * len(train_dataset)), len(train_dataset) - int(0.8 * len(train_dataset))])
         train_loader = DataLoader(train_dataset, batch_size=train_config["batch_size"], shuffle=True, num_workers=4)
         val_loader = DataLoader(val_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=4)
-        test_dataset = ImageCASDataset(data_path=train_config["data_raw_path"], mode="test")
+        test_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="test")
         test_loader = DataLoader(test_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=4)
         print("Using ImageCAS dataset")
     elif train_config["dataset"] == 'HepaticVessel':
         raise NotImplementedError
-        #train_dataset = HepaticVesselDataset(data_path=train_config["data_raw_path"], mode="train")
+        #train_dataset = HepaticVesselDataset(data_path=train_config["data_path"], mode="train")
         #train_dataset, val_dataset = random_split(train_dataset, [int(0.8 * len(train_dataset)), len(train_dataset) - int(0.8 * len(train_dataset))])
         #train_loader = DataLoader(train_dataset, batch_size=train_config["batch_size"], shuffle=True, num_workers=4)
         #val_loader = DataLoader(val_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=4)
-        #test_dataset = HepaticVesselDataset(data_path=train_config["data_raw_path"], mode="test")
+        #test_dataset = HepaticVesselDataset(data_path=train_config["data_path"], mode="test")
         #test_loader = DataLoader(test_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=4)
         #print("Using HepaticVessel dataset")
     else:

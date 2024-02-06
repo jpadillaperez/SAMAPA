@@ -1,13 +1,9 @@
-# -*- coding:utf-8 -*-
-# Author: Yuncheng Jiang, Zixun Zhang
-
 import os
 import datetime
 import torch
 import numpy as np
 from torch.cuda.amp.autocast_mode import autocast
 from utils.config import train_config
-from dataset import get_data
 from datetime import datetime
 import SimpleITK as sitk
 from tqdm import tqdm
@@ -53,11 +49,12 @@ class Trainer(object):
 
         with tqdm(total=len(self.train_loader), desc=f'Epoch {epoch}', unit='img') as pbar:
             #iterate over the batches of the dataset using the threadDataLoader
-            for i, data in enumerate(train_dataloader):
+            for i, data in enumerate(self.train_loader):
                 # Unpack the data
-                images, labels, drr_axial, drr_coronal, drr_sagittal = data
+                images, labels, drr_axial, drr_coronal, drr_sagittal, drr_axial_label, drr_coronal_label, drr_sagittal_label = data
                 images, labels = images.to(self.device), labels.to(self.device)
                 drr_axial, drr_coronal, drr_sagittal = drr_axial.to(self.device), drr_coronal.to(self.device), drr_sagittal.to(self.device)
+                drr_axial_label, drr_coronal_label, drr_sagittal_label = drr_axial_label.to(self.device), drr_coronal_label.to(self.device), drr_sagittal_label.to(self.device)
 
                 # Prepare the sample dictionary
                 sample = {
@@ -66,6 +63,9 @@ class Trainer(object):
                     'drr_axial': drr_axial,
                     'drr_coronal': drr_coronal,
                     'drr_sagittal': drr_sagittal,
+                    'drr_axial_label': drr_axial_label,
+                    'drr_coronal_label': drr_coronal_label,
+                    'drr_sagittal_label': drr_sagittal_label,
                     'device': self.device
                 }
 
@@ -101,16 +101,23 @@ class Trainer(object):
 
         with torch.no_grad():
             with tqdm(total=len(self.val_loader), desc=f'Epoch {epoch}', unit='img') as pbar:
-                for pack in self.val_loader:
-                    with autocast():
-                        imgs, targets, spacings = get_data(pack)
-                        imgs, targets, spacings = imgs.to(self.device), targets.to(self.device), spacings.to(self.device)
+                for i, data in enumerate(self.val_loader):
+                    imgs, targets, drr_axial, drr_coronal, drr_sagittal, drr_axial_label, drr_coronal_label, drr_sagittal_label = data
+                    imgs, targets = imgs.to(self.device), targets.to(self.device)
+                    drr_axial, drr_coronal, drr_sagittal = drr_axial.to(self.device), drr_coronal.to(self.device), drr_sagittal.to(self.device)
+                    drr_axial_label, drr_coronal_label, drr_sagittal_label = drr_axial_label.to(self.device), drr_coronal_label.to(self.device), drr_sagittal_label.to(self.device)
 
+                    with autocast():
                         sample = {}
                         sample['image'] = imgs
                         sample['masks'] = targets
+                        sample['drr_axial'] = drr_axial
+                        sample['drr_coronal'] = drr_coronal
+                        sample['drr_sagittal'] = drr_sagittal
+                        sample['drr_axial_label'] = drr_axial_label
+                        sample['drr_coronal_label'] = drr_coronal_label
+                        sample['drr_sagittal_label'] = drr_sagittal_label
                         sample['device'] = self.device
-                        sample['spacings'] = spacings
                         
                         outputs = self.model(sample)
                         loss    = self.criterion(outputs, targets)   

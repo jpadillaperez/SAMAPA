@@ -11,8 +11,9 @@ from monai.data import CacheDataset, ThreadDataLoader
 from einops import rearrange
 import torchvision.transforms as transforms
 from scipy.ndimage import zoom
+from torch.utils.data import Dataset, DataLoader, random_split
 
-class MedicalDataset:
+class HepaticVesselDataset(Dataset):
     def __init__(self, config):
         self.config = config
         self.data_dir = config["data_path"]

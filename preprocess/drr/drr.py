@@ -2,7 +2,7 @@ import numpy as np
 import os
 import math
 import itertools
-from .diffdrr.drr import DRR
+#from .diffdrr.drr import DRR
 import torch
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"

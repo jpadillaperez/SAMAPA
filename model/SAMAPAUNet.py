@@ -1,25 +1,20 @@
-# -*- coding:utf-8 -*-
-# Author: Yuncheng Jiang, Zixun Zhang
-
-import torch
+import os
 import wandb
 import imageio
-import os
+import numpy as np
+import nibabel as nib
+import torch
 from torch import nn
 import torch.nn.functional as F
+import torchvision.transforms as transforms
+from functools import partial
+from einops import rearrange
+from typing import Any, Optional, Tuple
+from utils.config import train_config, test_config
 from model.sam.image_encoder import ImageEncoderViT
 from model.sam.prompt_encoder import PromptEncoder
 from model.sam.mask_decoder import MaskDecoder
 from model.sam.transformer import TwoWayTransformer
-from utils.click_prompt import get_next_click3D_torch_2
-from functools import partial
-from utils.config import train_config, test_config
-from einops import rearrange
-import torchvision.transforms as transforms
-import nibabel as nib
-from typing import Any, Optional, Tuple
-import numpy as np
-from utils.drr.drr import applyDRR
 from utils.wandb import save3DImagetoWandb, save2DImagetoWandb
 
 class SAMAPAUNet(nn.Module):
@@ -71,152 +66,43 @@ class APAEncoder(nn.Module):
         
         self.beta = nn.Parameter(torch.ones(3), requires_grad=True)
 
-        self.h_att = APA_H(rotation=0)
-        self.w_att = APA_W(rotation=120)
-        self.d_att = APA_D(rotation=240)
+        self.axial_att = APA("axial")
+        self.coronal_att = APA("coronal")
+        self.sagittal_att = APA("sagittal")
         
     def forward(self, input):
         input["image"] = input["image"].repeat(1,3,1,1,1)
         input["masks"] = input["masks"].repeat(1,3,1,1,1)
 
-        h_attn = self.h_att(input)
-        w_attn = self.w_att(input)
-        d_attn = self.d_att(input)
+        axial_attn = self.axial_att(input)
+        coronal_attn = self.coronal_att(input)
+        sagittal_attn = self.sagittal_att(input)
 
-        return h_attn, w_attn, d_attn
+        return axial_attn, coronal_attn, sagittal_att
 
 #-----------------Axial Attention Modules-----------------#
-#TODO: The modules could be the same and then we could optimize the number of them
+#TODO: The modules could be the same #DONE
+#TODO: We could optimize the number of them by doing DRR on the fly
 
-class APA_Axial(nn.Module):
-    def __init__(self):
-        super(APA_Axial, self).__init__()
-        self.points_generator = PointsGenerator(batched_input, projection="axial")
-        self.attention = InnerBlock()
-
-    def forward(self, input):
-        drr_axial = input["drr_axial"]
-        points_input, labels_input = self.points_generator(input)
-
-        if train_config["debugging_mode"]["active"]:
-            #Save image with points to wandb
-            image_points = drr_axial.clone()
-            for i in range(points_input.shape[0]):
-                image_points[int(points_input[i,0]),int(points_input[i,1])] = 50
-            save2DImagetoWandb(image_points[0,0,:,:], "drr_axial_points")
-
-        attn = self.attention(drr_axial, points_input, labels_input)
-        return attn
-
-class APA_Coronal(nn.Module):
-    def __init__(self):
-        super(APA_Coronal, self).__init__()
-        self.points_generator = PointsGenerator(batched_input, projection="coronal")
-        self.attention = InnerBlock()
-        
-    def forward(self, input):
-        drr_coronal = input["drr_coronal"]
-        points_input, labels_input = self.points_generator(input)
-
-        if train_config["debugging_mode"]["active"]:
-            #Save image with points to wandb
-            image_points = drr_coronal.clone()
-            for i in range(points_input.shape[0]):
-                image_points[int(points_input[i,0]),int(points_input[i,1])] = 50
-            save2DImagetoWandb(image_points[0,0,:,:], "drr_coronal_points")
-
-        attn = self.attention(drr_coronal, points_input, labels_input)
-        return attn
-    
-class APA_Sagittal(nn.Module):
-    def __init__(self):
-        super(APA_Sagittal, self).__init__()
-        self.points_generator = PointsGenerator(batched_input, projection="sagittal")
-        self.attention = InnerBlock()
-        
-    def forward(self, input):
-        drr_sagittal = input["drr_sagittal"]
-        points_input, labels_input = self.points_generator(input)
-
-        if train_config["debugging_mode"]["active"]:
-            #Save image with points to wandb
-            image_points = drr_sagittal.clone()
-            for i in range(points_input.shape[0]):
-                image_points[int(points_input[i,0]),int(points_input[i,1])] = 50
-            save2DImagetoWandb(image_points[0,0,:,:], "drr_sagittal_points")
-
-        attn = self.attention(drr_sagittal, points_input, labels_input)
-        return attn
-
-#----------------- Points Generator -----------------#
-
-class PointsGenerator(nn.Module):
-    def __init__(self, batched_input, projection):
-        super(PointsGenerator, self).__init__() 
-
+class APA(nn.Module):
+    def __init__(self, projection):
+        super(APA, self).__init__()
         self.projection = projection.lower()
+        self.attention = InnerBlock(projection)
 
-        if self.projection == "axial":
-            self.rotation_matrix = np.array([
-                                            [1, 0, 0],
-                                            [0, 1, 0],
-                                            [0, 0, 1]
-                                            ])
+    def forward(self, input):
+        self.drr = input["drr_" + self.projection]
+        self.drr_label = input["drr_" + self.projection + "_label"]
 
-        elif self.projection == "coronal":
-            self.rotation_matrix = np.array([
-                                            [1, 0, 0],
-                                            [0, 0, 1],
-                                            [0, -1, 0]
-                                            ])
-                                
-        elif self.projection == "sagittal":
-            self.rotation_matrix = np.array([
-                                            [0, 0, 1],
-                                            [0, 1, 0],
-                                            [-1, 0, 0]
-                                            ])
-
-        prev_masks = torch.unsqueeze(torch.zeros_like(batched_input["masks"]).to(batched_input["device"])[:,0,:,:,:], 1)
-        low_res_masks = F.interpolate(prev_masks.float(), size=(self.image_encoder.img_size//4, self.image_encoder.img_size//4, self.image_encoder.img_size//4), mode="trilinear", align_corners=False)
-
-        #The shape is going to be always 1x1xbatched_input["masks"].shape[0] x batched_input["masks"].shape[1] because the projections are all of them over the axial plane
-        #TODO: find the axial plane index
-        self.prev_masks = torch.squeeze(prev_masks, 3)
-        self.low_res_masks = torch.squeeze(low_res_masks, 3)
-
-        if train_config["debugging_mode"]["active"]:
-            print("prev_masks shape: ", self.prev_masks.shape)
-            print("low_res_masks shape: ", self.low_res_masks.shape)
-
-
-    def forward(self, batched_input):
-        #TODO: create more than one point (maybe as iterations of decoders)
-        points_input, labels_input = self.get_points(self.prev_masks, batched_input["masks"])
-
-        print("points_input: ", points_input)
-        print("labels_input: ", labels_input)
-
-        # Rotate the point
-        points_input = np.dot(rotation_matrix, points_input)
-
-        print("rotated_point: ", points_input)
-
-        #keep just the 2d coordinates of the point
-        points_input = points_input[:2]
-        labels_input = labels_input[:2]
-
-        print("rotated_point 2d: ", points_input)
-        print("rotated_label 2d: ", labels_input)
-
-        return points_input, labels_input
-
+        attn = self.attention(self.drr, self.drr_label)
+        return attn
 
 #----------------- Basic Blocks -----------------#
 
 class InnerBlock(nn.Module):
-    def __init__(self, projection_idx):
+    def __init__(self, projection):
         super(InnerBlock, self).__init__()
+        self.projection = projection
 
         self.original_size = train_config["input_shape"]
         self.checkpoint = train_config["SAM_checkpoint"]
@@ -299,16 +185,15 @@ class InnerBlock(nn.Module):
         #TODO: include this number in the config file
 
 
-    def forward(self, input, points_input, labels_input):
-
+    def forward(self, drr, drr_label):
         #------------------------ SAM Architecture ---------------------------
-        drr_preprocessed = torch.stack([self.preprocess(x) for x in input], dim=0)    
+        drr_preprocessed = torch.stack([self.preprocess(x) for x in drr], dim=0)    
         image_embeddings = self.image_encoder(drr_preprocessed)
 
         #------------------------ Iteration Prompt and Mask ---------------------------
-
         #to create a 3D Mask with every click
         for num_click in range(self.num_clicks):
+            points_input, labels_input = self.get_points(prev_masks, drr_label, self.projection)
             if num_click == self.num_clicks - 1:
                 #One last forward pass to get the final mask
                 with torch.no_grad():
@@ -341,7 +226,7 @@ class InnerBlock(nn.Module):
                     multimask_output=False,
                 )
 
-            #prev_masks = F.interpolate(low_res_masks, size=(self.image_encoder.img_size, self.image_encoder.img_size), mode='trilinear', align_corners=False)
+            prev_masks = F.interpolate(low_res_masks, size=(self.image_encoder.img_size, self.image_encoder.img_size), mode='trilinear', align_corners=False)
 
         masks = self.postprocess_masks(
             low_res_masks,
@@ -396,16 +281,37 @@ class InnerBlock(nn.Module):
         return x
 
 
-    def get_points(self, prev_masks, gt3D):
-        batch_points, batch_labels = get_next_click3D_torch_2(prev_masks, gt3D)
+    def get_points(self, prev_masks, ground_truth, projection, mask_threshold= 0.4, depth_threshold=0.6):
+        batch_points = []
+        batch_labels = []
 
-        points_co = torch.cat(batch_points, dim=0).to(gt3D.device)
-        points_la = torch.cat(batch_labels, dim=0).to(gt3D.device)
+        index = 0 if projection == "axial" else 1 if projection == "coronal" else 2
 
-        points_input = points_co
-        labels_input = points_la
+        #Create the depth map out of the previous prediction
+        pred_masks = torch.zeros_like(ground_truth[0,0,:,:])
+        for i in reversed(range(prev_masks.shape[index])):
+            slice_ = prev_masks[i]
+            depth_value = 1 - i / (prev_masks.shape[index] - 1)
 
-        return points_input, labels_input
+            # The value of the depth map of prev_masks is equal to the ground_truth at best and smaller than the ground_truth at worst
+            nonzero_indexes = torch.nonzero(slice_ > mask_threshold)
+            pred_masks[nonzero_indexes] = depth_value * slice_[nonzero_indexes]
+        pred_masks = pred_masks.flip(0)
+
+        #TODO: temporal, fix in dataloader nifti images
+        if projection == "sagittal":
+            pred_masks = pred_masks.flip(1)
+
+        pred_masks = (pred_masks > depth_threshold)
+        true_masks = (ground_truth > depth_threshold)
+        fn_masks = torch.logical_and(true_masks, torch.logical_not(pred_masks))
+        fn_masks_loc = torch.argwhere(fn_masks)
+        point_input = fn_masks_loc[torch.randint(len(fn_masks_loc))]
+        label_input = 1 # Because it is a false negative
+
+        #TODO: Not ready for batch > 1
+
+        return point_input, label_input
 
 
 class Swish(nn.Module):

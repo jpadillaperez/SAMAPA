@@ -8,27 +8,25 @@ import json
 import numpy as np
 import random
 import torch
-import nibabel as nib
-from scipy.ndimage import zoom
-from datasets import ImageCASDataset
-from torch.utils.data import DataLoader
-import pandas as pd
-from drr.drr import create_drr
 import imageio
-from deepdrr import geo, Volume, MobileCArm
-from deepdrr.projector import Projector # separate import for CUDA init
+import nibabel as nib
+import pandas as pd
 from scipy.spatial.transform import Rotation as R
+from scipy.ndimage import zoom
+from skimage.transform import resize
+from deepdrr import geo, Volume, MobileCArm
+from deepdrr.projector import Projector
 
-dataset_info = {
-    "mean": -185.3538055419922,
-    "std": 439.9675598144531,
-}
+# Print GPU Info
+print(f"GPU available: {torch.cuda.is_available()}")
+print(f"GPU name: {torch.cuda.get_device_name(0)}")
+print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024 ** 3} GB")
 
+# -------- Preprocessing config --------
 preprocessing_config = {
         "data_raw_path":        '/home/guests/jorge_padilla/data/ImageCAS',
         "output_folder":        '/home/guests/jorge_padilla/data/ImageCAS/preprocessed',
         "split":                1,
-        "normalize_intensity":  True,
         "resample":{
                 "active":       True,
                 "shape":        [512, 512, 512],
@@ -39,35 +37,19 @@ preprocessing_config = {
                 #"voxel_dim":    [1, 1, 1],
                 },
         "generate_drr_projections": True,
-
         }
 
-        
-def applyDRR_nifti(nii_path):
+def applyDRR_nifti(nii_path, output_shape=(512, 512)):
     """
     Create DRRs from a NIfTI image.
     
     Parameters:
     nii_path (string): The path to the image to create the DRRs from.
-    axial_rotation (float): The axial rotation angle in degrees.
-    coronal_rotation (float): The coronal rotation angle in degrees.
-    sagittal_rotation (float): The sagittal rotation angle in degrees.
+    output_shape (tuple): The desired output shape of the DRRs.
     
     Returns:
     np.array: The DRRs.
     """
-    
-
-
-    #-------- DiffDRR --------
-    # Get the data from the NIfTI image
-    #img_data = img_nii.get_fdata()
-    # Get the voxel dimensions
-    #voxel_dim = img_nii.header.get_zooms()
-    #Create DRR
-    #drr_axial = create_drr(img_data, spacing=voxel_dim, projection="axial")
-    #drr_coronal = create_drr(img_data, spacing=voxel_dim, projection="coronal")
-    #drr_sagittal = create_drr(img_data, spacing=voxel_dim, projection="sagittal")
 
     #-------- DeepDRR --------
     carm = MobileCArm()
@@ -75,9 +57,12 @@ def applyDRR_nifti(nii_path):
 
     with Projector(ct, carm=carm) as projector:
         # Orient and position the patient model in world space.
-        axial_rotation = R.from_euler('z', 90, degrees=True) # or R.from_euler('x', 90, degrees=True)
-        coronal_rotation = R.from_euler('y', 90, degrees=True) # or R.from_euler('y', 90, degrees=True)
-        sagittal_rotation = R.from_euler('x', 90, degrees=True) # or R.from_euler('z', 90, degrees=True)
+        axial_rotation = R.from_euler('z', 90, degrees=True)
+        sagittal_rotation = R.from_euler('y', 90, degrees=True)
+        coronal_rotation = R.from_euler('x', 90, degrees=True)
+
+        # Center the patient model in world space.
+        ct.place_center(carm.isocenter_in_world)
 
         # Get axial DRR
         ct.rotate(axial_rotation)
@@ -100,6 +85,11 @@ def applyDRR_nifti(nii_path):
         # Undo sagittal rotation
         ct.rotate(sagittal_rotation.inv())
 
+    # Resize to original size
+    drr_axial = resize(drr_axial, output_shape, order=1)
+    drr_coronal = resize(drr_coronal, output_shape, order=1)
+    drr_sagittal = resize(drr_sagittal, output_shape, order=1)
+
     return drr_axial, drr_coronal, drr_sagittal
 
 
@@ -114,11 +104,12 @@ def applyDRRlabel_nifti(label_nii):
     """
 
     label = label_nii.get_fdata()
+    label = torch.from_numpy(label).cuda()
 
     # Set the rotation based on the projection
-    axial_rotated_volume = np.rot90(label, k=1, axes=(0, 1))
-    coronal_rotated_volume = np.rot90(label, k=1, axes=(0, 2))
-    sagittal_rotated_volume = np.rot90(label, k=1, axes=(1, 2))
+    axial_rotated_volume = torch.rot90(label, k=1, dims=(0, 2))
+    coronal_rotated_volume = torch.rot90(label, k=1, dims=(0, 1))
+    sagittal_rotated_volume = torch.rot90(label, k=1, dims=(1, 2))
 
     # Initialize the depth map
     axial_depth_map = torch.zeros([axial_rotated_volume.shape[0], axial_rotated_volume.shape[1]], dtype=torch.float32)
@@ -126,131 +117,28 @@ def applyDRRlabel_nifti(label_nii):
     sagittal_depth_map = torch.zeros([sagittal_rotated_volume.shape[0], sagittal_rotated_volume.shape[1]], dtype=torch.float32)
 
     # Iterate through the slices of the volume and update the depth map
-    for i, slice_ in enumerate(axial_rotated_volume):
-        # Normalize the depth value to range [0, 1]
-        depth_value = i / (axial_rotated_volume.shape[0] - 1)
-        # Update the depth map: set the depth value where there is a label (value > 0)
+    for i in reversed(range(axial_rotated_volume.shape[0])):
+        slice_ = axial_rotated_volume[i]
+        depth_value = 1 - i / (axial_rotated_volume.shape[0] - 1)
         axial_depth_map[slice_ > 0] = depth_value
 
-    for i, slice_ in enumerate(coronal_rotated_volume):
-        # Normalize the depth value to range [0, 1]
-        depth_value = i / (coronal_rotated_volume.shape[0] - 1)
-        # Update the depth map: set the depth value where there is a label (value > 0)
+    axial_depth_map = axial_depth_map.flip(0).cpu().numpy()
+
+    for i in reversed(range(coronal_rotated_volume.shape[0])):
+        slice_ = coronal_rotated_volume[i]
+        depth_value = 1 - i / (coronal_rotated_volume.shape[0] - 1)
         coronal_depth_map[slice_ > 0] = depth_value
     
-    for i, slice_ in enumerate(sagittal_rotated_volume):
-        # Normalize the depth value to range [0, 1]
+    coronal_depth_map = coronal_depth_map.flip(0).cpu().numpy()
+    
+    for i in reversed(range(sagittal_rotated_volume.shape[0])):
+        slice_ = sagittal_rotated_volume[i]
         depth_value = 1 - i / (sagittal_rotated_volume.shape[0] - 1)
-        # Update the depth map: set the depth value where there is a label (value > 0)
         sagittal_depth_map[slice_ > 0] = depth_value
+
+    sagittal_depth_map = sagittal_depth_map.flip(0).flip(1).cpu().numpy()
     
     return axial_depth_map, coronal_depth_map, sagittal_depth_map
-
-
-def remove_outliers_nifti(img):
-    """
-    Remove outliers from the image.
-    
-    Parameters:
-    img (nib.Nifti1Image): The image to remove outliers from.
-    
-    Returns:
-    nib.Nifti1Image: The image without outliers.
-    """
-
-    # Get the data from the NIfTI image
-    img_data = img.get_fdata()
-    
-    # Get the indices of the outliers
-    img_outliers = np.where(img_data > dataset_info["mean"] + 3*dataset_info["std"])
-    
-    # Remove the outliers
-    img_data[img_outliers] = dataset_info["mean"] + 3*dataset_info["std"]
-    
-    # Create a new NIfTI image with the normalized data
-    new_header = img.header.copy()
-    new_header.set_data_dtype(np.float32)
-    img = nib.Nifti1Image(img_data, img.affine, new_header)
-
-    return img
-
-
-def remove_outliers_drr(drr_axial, drr_coronal, drr_sagittal):
-    """
-    Remove outliers from the DRRs.
-    
-    Parameters:
-    drr_axial (np.array): The axial DRR.
-    drr_coronal (np.array): The coronal DRR.
-    drr_sagittal (np.array): The sagittal DRR.
-    """
-
-    # Calcculate the mean and standard deviation of the DRRs
-    drr_mean = np.mean([drr_axial, drr_coronal, drr_sagittal])
-    drr_std = np.std([drr_axial, drr_coronal, drr_sagittal])
-
-    # Get the indices of the outliers
-    drr_axial_outliers = np.where(drr_axial > drr_mean + 3*drr_std)
-    drr_coronal_outliers = np.where(drr_coronal > drr_mean + 3*drr_std)
-    drr_sagittal_outliers = np.where(drr_sagittal > drr_mean + 3*drr_std)
-
-    # Remove the outliers
-    drr_axial[drr_axial_outliers] = drr_mean + 3*drr_std
-    drr_coronal[drr_coronal_outliers] = drr_mean + 3*drr_std
-    drr_sagittal[drr_sagittal_outliers] = drr_mean + 3*drr_std
-
-    return drr_axial, drr_coronal, drr_sagittal
-
-
-def normalize_intensity_nifti(img):
-    """
-    Normalize the intensity of the image considering the mean and standard deviation of the dataset.
-    
-    Parameters:
-    img (nib.Nifti1Image): The image to normalize.
-    
-    Returns:
-    nib.Nifti1Image: The normalized image.
-    """
-        
-    # Get the data from the NIfTI image
-    img_data = img.get_fdata()
-    
-    # Normalize the image
-    img_data = (img_data - dataset_info["mean"]) / dataset_info["std"]
-    
-    # Create a new NIfTI image with the normalized data
-    new_header = img.header.copy()
-    new_header.set_data_dtype(np.float32)
-    normalized_nii = nib.Nifti1Image(img_data, img.affine, new_header)
-    
-    return normalized_nii
-
-
-def normalize_intensity_drr(drr_axial, drr_coronal, drr_sagittal):
-    """
-    Normalize the DRRs considering the mean and standard deviation of the drr.
-    
-    Parameters:
-    drr_axial (np.array): The axial DRR.
-    drr_coronal (np.array): The coronal DRR.
-    drr_sagittal (np.array): The sagittal DRR.
-    
-    Returns:
-    np.array: The normalized DRRs.
-    """
-    
-    # Calculate the mean and standard deviation of the DRRs
-    drr_mean = np.mean([drr_axial, drr_coronal, drr_sagittal])
-    drr_std = np.std([drr_axial, drr_coronal, drr_sagittal])
-
-    # Normalize the DRRs
-    drr_axial = (drr_axial - drr_mean) / drr_std
-    drr_coronal = (drr_coronal - drr_mean) / drr_std
-    drr_sagittal = (drr_sagittal - drr_mean) / drr_std
-
-    return drr_axial, drr_coronal, drr_sagittal
-
 
 
 def resample_nifti(img_nii, label_nii, target_shape, target_voxel_dim):
@@ -346,11 +234,11 @@ def main():
     # -------- Preprocessing train loop --------
     for i, data in enumerate(train_indices):
         print(f"Processing train sample {i+1}/{len(train_indices)}")
-
-        #debugging
-        if i == 1:
-            break
-
+    
+        #AVOID FIRST 75 SAMPLES
+        if i < 75:
+            continue
+            
         #-------- Load data --------
         # Get the image and label file paths
         img_path = os.path.join(directory, f'{image_filenames.iloc[data]}.img.nii.gz')
@@ -368,15 +256,8 @@ def main():
                                                 preprocessing_config["resample"]["voxel_dim"])
         # Create DRRs
         if preprocessing_config["generate_drr_projections"]:
-            drr_axial, drr_coronal, drr_sagittal = applyDRR_nifti(img_path)
-            drr_axial, drr_coronal, drr_sagittal = normalize_intensity_drr(drr_axial, drr_coronal, drr_sagittal)
-            drr_axial, drr_coronal, drr_sagittal = remove_outliers_drr(drr_axial, drr_coronal, drr_sagittal)
+            drr_axial, drr_coronal, drr_sagittal = applyDRR_nifti(img_path, img_nii.shape[:2])
             drr_axial_label, drr_coronal_label, drr_sagittal_label = applyDRRlabel_nifti(label_nii)
-
-        # Normalize the intensity of the image and remove outliers
-        if preprocessing_config["normalize_intensity"]:
-            img_nii = normalize_intensity_nifti(img_nii)
-            img_nii = remove_outliers_nifti(img_nii)
 
         #-------- Save preprocessed data --------
         # Save as nifti
