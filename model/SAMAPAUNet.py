@@ -15,70 +15,57 @@ from model.sam.image_encoder import ImageEncoderViT
 from model.sam.prompt_encoder import PromptEncoder
 from model.sam.mask_decoder import MaskDecoder
 from model.sam.transformer import TwoWayTransformer
+
 from utils.wandb import save3DImagetoWandb, save2DImagetoWandb
 
 class SAMAPAUNet(nn.Module):
-    def __init__(self, num_classes=1):
+    def __init__(self, partial_train = ["axial", "coronal", "sagittal"]):
         super(SAMAPAUNet, self).__init__()
 
-        self.encoder = APAEncoder()
+        self.encoder = APAEncoder(partial_train=partial_train)
+        self.partial_train = partial_train
+        self.full_training = (partial_train == ["axial", "coronal", "sagittal"])
 
-        self.mlp_decoder = MLP(input_size=train_config["input_shape"][0] * train_config["input_shape"][1] +
-                                        train_config["input_shape"][0] * train_config["input_shape"][2] +
-                                        train_config["input_shape"][1] * train_config["input_shape"][2],
-
+        if self.full_training:
+            self.mlp_decoder = MLP(input_size=train_config["input_shape"][0] * train_config["input_shape"][1] * 3,
                                 output_size=train_config["input_shape"][0] * train_config["input_shape"][1] * train_config["input_shape"][2])
-                                
-        self.sigmoid = torch.nn.Sigmoid()
-
-        #override train and eval methods to keep weights of image encoder frozen
-        #self.train = partial(self.train, freeze_encoder=False)
-        #self.eval = partial(self.eval, freeze_encoder=True)
 
     def forward(self, x):
-        if train_config["debugging_mode"]["active"]:
-            save3DImagetoWandb(x["image"][0,0,:,:,:], "input_image")
-            save3DImagetoWandb(x["masks"][0,0,:,:,:], "input_mask")
-            save2DImagetoWandb(x["drr_axial"], "input_drr_axial")
-            save2DImagetoWandb(x["drr_coronal"], "input_drr_coronal")
-            save2DImagetoWandb(x["drr_sagittal"], "input_drr_sagittal")
+        self.axial_out, self.coronal_out, self.sagittal_out = self.encoder(x)
 
-        h_attn, w_attn, d_attn = self.encoder(x)
-
-        if train_config["debugging_mode"]["active"]:
-            save2DImagetoWandb(h_attn[0,0,:,:], "h_attn")
-            save2DImagetoWandb(w_attn[0,0,:,:], "w_attn")
-            save2DImagetoWandb(d_attn[0,0,:,:], "d_attn")
-
-        out = self.mlp_decoder(torch.cat((h_attn, w_attn, d_attn), dim=1))
-        out = self.sigmoid(out)
-
-        if train_config["debugging_mode"]["active"]:
-            save3DImagetoWandb(out[0,0,:,:,:], "output_masks")
+        if self.full_training:
+            input_mlp = torch.cat((h_attn, w_attn, d_attn), dim=1)
+            out = self.mlp_decoder(input_mlp.view(input_mlp.size(0), -1).float())
+            out = out.view(out.size(0), 1, train_config["input_shape"][0], train_config["input_shape"][1], train_config["input_shape"][2])
+        else:
+            if "axial" in self.partial_train:
+                out = self.axial_out
+            elif "coronal" in self.partial_train:
+                out = self.coronal_out
+            elif "sagittal" in self.partial_train:
+                out = self.sagittal_out
 
         return out
 
-
 #-----------------APA Encoder-----------------#
 class APAEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, partial_train = ["axial", "coronal", "sagittal"]):
         super(APAEncoder, self).__init__()
+        self.partial_train = partial_train
         
-        self.beta = nn.Parameter(torch.ones(3), requires_grad=True)
-
-        self.axial_att = APA("axial")
-        self.coronal_att = APA("coronal")
-        self.sagittal_att = APA("sagittal")
+        for proj in partial_train:
+            setattr(self, proj + "_att", APA(projection=proj))
         
     def forward(self, input):
-        input["image"] = input["image"].repeat(1,3,1,1,1)
-        input["masks"] = input["masks"].repeat(1,3,1,1,1)
+        self.axial_attn = None
+        self.coronal_attn = None
+        self.sagittal_attn = None
 
-        axial_attn = self.axial_att(input)
-        coronal_attn = self.coronal_att(input)
-        sagittal_attn = self.sagittal_att(input)
+        for proj in self.partial_train:
+            attn = getattr(self, proj + "_att")(input)
+            setattr(self, proj + "_attn", attn)
 
-        return axial_attn, coronal_attn, sagittal_att
+        return self.axial_attn, self.coronal_attn, self.sagittal_attn
 
 #-----------------Axial Attention Modules-----------------#
 #TODO: The modules could be the same #DONE
@@ -93,7 +80,6 @@ class APA(nn.Module):
     def forward(self, input):
         self.drr = input["drr_" + self.projection]
         self.drr_label = input["drr_" + self.projection + "_label"]
-
         attn = self.attention(self.drr, self.drr_label)
         return attn
 
@@ -103,49 +89,41 @@ class InnerBlock(nn.Module):
     def __init__(self, projection):
         super(InnerBlock, self).__init__()
         self.projection = projection
-
         self.original_size = train_config["input_shape"]
-        self.checkpoint = train_config["SAM_checkpoint"]
 
         #------------------------ SAM Architecture ---------------------------
-        self.input_size = 64 
-        #TODO: include this number in the config file
-
+        self.image_size = 1024
         self.patch_size = 16
         self.encoder_embed_dim = 768
-        self.image_embedding_size = self.input_size // self.patch_size
-
+        self.encoder_num_heads = 12
+        self.encoder_depth = 12
+        self.image_embedding_size = self.image_size // self.patch_size
         self.prompt_embed_dim = 256
         self.no_mask_embed = nn.Embedding(1, self.prompt_embed_dim)
         self.pe_layer = PositionEmbeddingRandom(self.prompt_embed_dim // 2)
 
-        #TODO: calculate mean and std of the dataset (or from config file)
-        self.pixel_mean = 123.675
-        self.pixel_std = 58.395
-        self.pixel_mean = torch.tensor(self.pixel_mean).to("cuda:0")
-        self.pixel_std = torch.tensor(self.pixel_std).to("cuda:0")
-
+        self.mask_threshold = 0.4
 
         self.image_encoder = ImageEncoderViT(
             args = None,
-            depth= 12,
+            depth= self.encoder_depth,
             embed_dim= self.encoder_embed_dim,
-            img_size= self.input_size,
+            img_size= self.image_size,
             mlp_ratio= 4,
             norm_layer= partial(torch.nn.LayerNorm, eps=1e-6),
-            num_heads= 12,
+            num_heads= self.encoder_num_heads,
             patch_size= self.patch_size,
             qkv_bias= True,
             use_rel_pos= True,
             global_attn_indexes = [2, 5, 8, 11],
             window_size=14,
-            out_chans = 256,
+            out_chans = self.prompt_embed_dim,
         )
 
         self.prompt_encoder = PromptEncoder(
             embed_dim= self.prompt_embed_dim,
             image_embedding_size= [self.image_embedding_size, self.image_embedding_size],
-            input_image_size= [self.input_size, self.input_size],
+            input_image_size= [self.image_size, self.image_size],
             mask_in_chans= 16,
         )
 
@@ -162,80 +140,68 @@ class InnerBlock(nn.Module):
             iou_head_hidden_dim=256,
         )
 
-        with open(self.checkpoint, "rb") as f:
-            state_dict = torch.load(f)
-
-        #------------------------ Load Weights ---------------------------
-        ##load all the weights
-        self.image_encoder.load_state_dict(state_dict, strict=False)  
-        self.image_encoder.eval()
-        self.image_encoder.requires_grad_(False)
-        for name, param in self.image_encoder.named_parameters():
-            if name.find('MLP_Adapter') != -1:
-                param.requires_grad = True
-                #print('---------Unfreezing layer: ', name)
-            elif name.find('Space_Adapter') != -1:
-                param.requires_grad = True
-                #print('---------Unfreezing layer: ', name)
-        self.prompt_encoder.load_state_dict(state_dict, strict=False)
-        self.mask_decoder.load_state_dict(state_dict, strict=False)
-
-        #------------------------ Extras ---------------------------
-        self.num_clicks = 2 
-        #TODO: include this number in the config file
-
 
     def forward(self, drr, drr_label):
-        #------------------------ SAM Architecture ---------------------------
-        drr_preprocessed = torch.stack([self.preprocess(x) for x in drr], dim=0)    
+        #------------------------ SAM Architecture ---------------------------    
+        drr_preprocessed = self.preprocess(drr.squeeze(0))
+        drr_preprocessed = self.add_three_channels(drr_preprocessed).float()
+        drr_label_preprocessed = self.preprocess(drr_label)
+
         image_embeddings = self.image_encoder(drr_preprocessed)
+        points_input, labels_input = self.get_points(torch.zeros_like(drr_label_preprocessed, dtype=torch.float32, device=drr.device), drr_label_preprocessed, num_points=1)
+        
+        if train_config["debugging_mode"]["active"]:
+            save2DImagetoWandb(drr_preprocessed[0, 0], f"Input_{self.projection}")
+            save2DImagetoWandb(drr_label_preprocessed[0, 0], f"Target_{self.projection}")
+            save2DImagetoWandb(image_embeddings[0, 0], f"ImageEmbedding_{self.projection}")
+
+            #Create Input with points
+            input_with_points = drr_preprocessed.clone()
+            for point in points_input:
+                #Set 5 pixels around the point to 1
+                input_with_points[0, 0, int(point[0])-2:int(point[0])+3, int(point[1])-2:int(point[1])+3] = 1
+            save2DImagetoWandb(input_with_points[0, 0], f"InputWithPoints_{self.projection}")
+
+        batched_input = {
+            "image": drr_preprocessed,
+            "original_size": [self.original_size[0], self.original_size[1]],
+            "point_coords": points_input,
+            "point_labels": labels_input,
+        }
 
         #------------------------ Iteration Prompt and Mask ---------------------------
-        #to create a 3D Mask with every click
-        for num_click in range(self.num_clicks):
-            points_input, labels_input = self.get_points(prev_masks, drr_label, self.projection)
-            if num_click == self.num_clicks - 1:
-                #One last forward pass to get the final mask
-                with torch.no_grad():
-                    sparse_embeddings, dense_embeddings = self.prompt_encoder(
-                        points=None,
-                        boxes=None,
-                        masks=low_res_masks,
-                        )
-                low_res_masks, iou_predictions = self.mask_decoder(
-                    image_embeddings=image_embeddings,
-                    image_pe=self.prompt_encoder.get_dense_pe(),
-                    sparse_prompt_embeddings=sparse_embeddings,
-                    dense_prompt_embeddings=dense_embeddings,
-                    multimask_output=False,
-                )
-                    
+        for image_record, curr_embedding in zip(batched_input, image_embeddings):
+            if "point_coords" in image_record:
+                points = (image_record["point_coords"], image_record["point_labels"])
             else:
-                # Forward pass after adding the click
-                with torch.no_grad():
-                    sparse_embeddings, dense_embeddings = self.prompt_encoder(
-                    points=[points_input, labels_input],
-                    boxes=None,
-                    masks=low_res_masks,
-                    )
-                low_res_masks, iou_predictions = self.mask_decoder(
-                    image_embeddings=image_embeddings,
-                    image_pe=self.prompt_encoder.get_dense_pe(),
-                    sparse_prompt_embeddings=sparse_embeddings,
-                    dense_prompt_embeddings=dense_embeddings,
-                    multimask_output=False,
-                )
+                points = None
+            sparse_embeddings, dense_embeddings = self.prompt_encoder(
+                points=points,
+                boxes=None,
+                masks=None,
+            )
+            
+            low_res_masks, iou_predictions = self.mask_decoder(
+                image_embeddings=curr_embedding.unsqueeze(0),
+                image_pe=self.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=False,
+            )
 
-            prev_masks = F.interpolate(low_res_masks, size=(self.image_encoder.img_size, self.image_encoder.img_size), mode='trilinear', align_corners=False)
+            if train_config["debugging_mode"]["active"]:
+                save2DImagetoWandb(low_res_masks[0, 0], f"LowResMask_{self.projection}")
 
-        masks = self.postprocess_masks(
-            low_res_masks,
-            input_size=[self.original_size[0], self.original_size[1]],
-            original_size=[self.original_size[0], self.original_size[1]],
-        )
+            masks = self.postprocess_masks(
+                low_res_masks,
+                input_size=(self.image_encoder.img_size, self.image_encoder.img_size),
+                original_size=(self.original_size[0], self.original_size[1]),
+            )
 
-        #TODO: add here the 3d loss function?
+            if train_config["debugging_mode"]["active"]:
+                save2DImagetoWandb(masks[0, 0], f"Mask_{self.projection}")
 
+            masks = masks.float()
         return masks
 
 
@@ -269,121 +235,64 @@ class InnerBlock(nn.Module):
         return masks
 
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize pixel values and pad to a square input."""
-        # Normalize colors
-        x = (x - self.pixel_mean) / self.pixel_std
-
-        # Pad
-        h, w = x.shape[-2:]
-        padh = self.image_encoder.img_size - h
-        padw = self.image_encoder.img_size - w
-        x = F.pad(x, (0, padw, 0, padh))
+        """Interpolates to a square input """
+        x = F.interpolate(x, (self.image_encoder.img_size, self.image_encoder.img_size), mode="bilinear", align_corners=False)
         return x
 
+    def add_three_channels(self, x: torch.Tensor) -> torch.Tensor:
+        """Add three channels to the input."""
+        return x.repeat(1, 3, 1, 1)
 
-    def get_points(self, prev_masks, ground_truth, projection, mask_threshold= 0.4, depth_threshold=0.6):
+
+    def get_points(self, prev_masks, ground_truth, mask_threshold= 0.4, depth_threshold=0, num_points=1):
+        """
+        Get the points and labels for the next click.
+        
+        Arguments:
+        prev_masks (torch.Tensor): The predicted masks from the previous
+            click, in BxHxW format.
+        ground_truth (torch.Tensor): The ground truth masks, in BxHxW format.
+        mask_threshold (float): The threshold for the predicted masks.
+        depth_threshold (float): The threshold for the ground truth masks.
+
+        Returns:
+        (torch.Tensor, torch.Tensor): The point and label for the next click.
+        """
+        
         batch_points = []
         batch_labels = []
 
-        index = 0 if projection == "axial" else 1 if projection == "coronal" else 2
+        if ground_truth.ndim == 4:
+            ground_truth = ground_truth.squeeze(0).squeeze(0)
+        if prev_masks.ndim == 4:
+            prev_masks = prev_masks.squeeze(0).squeeze(0)
 
-        #Create the depth map out of the previous prediction
-        pred_masks = torch.zeros_like(ground_truth[0,0,:,:])
-        for i in reversed(range(prev_masks.shape[index])):
-            slice_ = prev_masks[i]
-            depth_value = 1 - i / (prev_masks.shape[index] - 1)
+        # Apply value threshold to the predicted masks
+        prev_masks = (prev_masks > mask_threshold)
 
-            # The value of the depth map of prev_masks is equal to the ground_truth at best and smaller than the ground_truth at worst
-            nonzero_indexes = torch.nonzero(slice_ > mask_threshold)
-            pred_masks[nonzero_indexes] = depth_value * slice_[nonzero_indexes]
-        pred_masks = pred_masks.flip(0)
-
-        #TODO: temporal, fix in dataloader nifti images
-        if projection == "sagittal":
-            pred_masks = pred_masks.flip(1)
-
-        pred_masks = (pred_masks > depth_threshold)
+        # Apply depth threshold to the ground truth masks
         true_masks = (ground_truth > depth_threshold)
-        fn_masks = torch.logical_and(true_masks, torch.logical_not(pred_masks))
-        fn_masks_loc = torch.argwhere(fn_masks)
-        point_input = fn_masks_loc[torch.randint(len(fn_masks_loc))]
-        label_input = 1 # Because it is a false negative
 
-        #TODO: Not ready for batch > 1
+        # Get the false positives and false negatives
+        fn_masks = torch.logical_and(true_masks, torch.logical_not(prev_masks))
 
-        return point_input, label_input
+        if len(torch.where(fn_masks)[0]) > 0:
+            points_source = torch.where(fn_masks)
+        else:
+            points_source = torch.where(true_masks)
 
+        for i in range(num_points):
+            idx = np.random.choice(len(points_source[0]))
+            point_input = torch.tensor([points_source[0][idx], points_source[1][idx]], dtype=torch.float32, device=prev_masks.device)
+            label_input = torch.tensor([1], dtype=torch.int64, device=prev_masks.device)
+            batch_points.append(point_input)
+            batch_labels.append(label_input)
 
-class Swish(nn.Module):
-    def __init__(self, inplace: bool = False):
-        super(Swish, self).__init__()
-        self.inplace = inplace
+        batch_points = torch.stack(batch_points, dim=0)
+        batch_labels = torch.stack(batch_labels, dim=0)
 
-    def forward(self, x):
-        return swish(x, self.inplace)
+        return batch_points, batch_labels
 
-
-class MixConv(nn. Module):
-    def __init__(self, inp, oup):
-        super(MixConv, self).__init__()
-
-        self.groups = oup // 4
-        in_channel = inp // 4
-        out_channel = oup // 4
-
-        self.dwconv1 = nn.Conv2d(in_channel, out_channel, 3, padding=1)
-        self.dwconv2 = nn.Conv2d(in_channel, out_channel, 5, padding=2)
-        self.dwconv3 = nn.Conv2d(in_channel, out_channel, 7, padding=3)
-        self.dwconv4 = nn.Conv2d(in_channel, out_channel, 9, padding=4)
-
-        self.pwconv = nn.Sequential(
-            nn.BatchNorm2d(oup),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(oup, oup, 1),
-            nn.BatchNorm2d(oup),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        a, b, c, d = torch.split(x, self.groups, dim=1)
-        a = self.dwconv1(a)
-        b = self.dwconv1(b)
-        c = self.dwconv1(c)
-        d = self.dwconv1(d)
-
-        out = torch.cat([a, b, c, d], dim=1)
-        out = self.pwconv(out)
-
-        return out
-
-class conv_block(nn.Module):
-    def __init__(self, ch_in, ch_out):
-        super(conv_block,self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv3d(ch_out, ch_out, kernel_size=3,stride=1,padding=1,bias=True),
-            nn.BatchNorm3d(ch_out),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self,x):
-        x = self.conv(x)
-        return x
-    
-class doubelconv_block(nn.Module):
-    def __init__(self, ch_in, ch_out):
-        super(doubelconv_block,self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv3d(ch_in, ch_out, kernel_size=3,stride=1,padding=1,bias=True),
-            nn.BatchNorm3d(ch_out),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(ch_out, ch_out, kernel_size=3,stride=1,padding=1,bias=True),
-            nn.BatchNorm3d(ch_out),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self,x):
-        x = self.conv(x)
-        return x
 
 class PositionEmbeddingRandom(nn.Module):
     """

@@ -44,10 +44,7 @@ class DiceLoss(nn.Module):
         y_sum = torch.sum(target * target)
         z_sum = torch.sum(score * score)
         loss = (2 * intersect + smooth) / (z_sum + y_sum + smooth)
-
         loss = 1 - loss
-
-
         return loss
 
     def forward(self, inputs, target, softmax=False, sigmoid=True, n_classes=1):
@@ -59,8 +56,6 @@ class DiceLoss(nn.Module):
         loss = 0.0
         for i in range(0, n_classes):
             dice_loss = self._dice_loss(inputs[:, i], target[:, i])
-            #print("Dice Loss: " + str(dice_vessel.float().cpu().detach().numpy()))
-            print("Dice Score: " + str(1 - dice_loss.float().cpu().detach().numpy()))
             loss += dice_loss
         return loss
     
@@ -91,21 +86,15 @@ class DiceLossWeighted(nn.Module):
         for i in range(0, n_classes):
             dice_vessel = self._dice_loss(inputs[:, i], target[:, i])
             class_wise_dice.append(1.0 - dice_vessel.item())
-            #print("Dice Loss Vessel: " + str(dice_vessel.float().cpu().detach().numpy()))
-            print("Dice Score Vessel: " + str(1 - dice_vessel.float().cpu().detach().numpy()))
 
             ##Try implementing separated vessel
             dice_background = self._dice_loss(1 + inputs[:, i], 1 + target[:, i])
-            #print("Dice Loss Background: " + str(dice_background.float().cpu().detach().numpy()))
-            print("Dice Score Background: " + str(1 - dice_background.float().cpu().detach().numpy()))
             
             if(self.weight == None):
                 loss += dice_vessel + dice_background
             else:
                 loss += dice_vessel * self.weight[0] + dice_background * self.weight[1]
 
-            #print("Overall Dice Loss: " + str(loss.float().cpu().detach().numpy()))
-            print("Overall Dice Score: " + str(loss.float().cpu().detach().numpy()))
         return loss
     
 class BinaryFocalLoss(nn.Module):

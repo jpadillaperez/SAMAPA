@@ -112,8 +112,6 @@ class ImageEncoderViT(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
         if self.pos_embed is not None:
-            print("pos_embed: ", self.pos_embed.shape)
-            print("x: ", x.shape)
             x = x + self.pos_embed
 
         for blk in self.blocks:
@@ -170,10 +168,8 @@ class Block(nn.Module):
         )
 
         # Adapter
-        ##Unfreeze these two
         self.MLP_Adapter = Adapter(dim, skip_connect=False)  # MLP-adapter, no skip connection
         self.Space_Adapter = Adapter(dim)  # with skip connection
-        ##
         self.scale = scale
         #self.Depth_Adapter = Adapter(dim, skip_connect=False)  # no skip connection
         self.norm2 = norm_layer(dim)

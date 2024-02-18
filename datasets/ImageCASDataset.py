@@ -112,10 +112,10 @@ class ImageCASDataset(Dataset):
         drr_sagittal = self.drr_transform(drr_sagittal).unsqueeze(0)
 
         # Convert the label to a tensor
-        label = torch.from_numpy(label).long().unsqueeze(0)
-        drr_axial_label = torch.from_numpy(drr_axial_label).long().unsqueeze(0)
-        drr_coronal_label = torch.from_numpy(drr_coronal_label).long().unsqueeze(0)
-        drr_sagittal_label = torch.from_numpy(drr_sagittal_label).long().unsqueeze(0)
+        label = torch.from_numpy(label).unsqueeze(0)
+        drr_axial_label = torch.from_numpy(drr_axial_label).unsqueeze(0)
+        drr_coronal_label = torch.from_numpy(drr_coronal_label).unsqueeze(0)
+        drr_sagittal_label = torch.from_numpy(drr_sagittal_label).unsqueeze(0)
         
         return [image, label, drr_axial, drr_coronal, drr_sagittal, drr_axial_label, drr_coronal_label, drr_sagittal_label]
 

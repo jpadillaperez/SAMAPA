@@ -25,16 +25,16 @@ print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024 ** 
 # -------- Preprocessing config --------
 preprocessing_config = {
         "data_raw_path":        '/home/guests/jorge_padilla/data/ImageCAS',
-        "output_folder":        '/home/guests/jorge_padilla/data/ImageCAS/preprocessed',
+        "output_folder":        '/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128',
         "split":                1,
         "resample":{
                 "active":       True,
-                "shape":        [512, 512, 512],
+                #"shape":        [512, 512, 512],
                 #"shape":       [256, 256, 256],
-                #"shape":        [128, 128, 128],
-                "voxel_dim":    [0.25, 0.25, 0.25],
+                "shape":        [128, 128, 128],
+                #"voxel_dim":    [0.25, 0.25, 0.25],
                 #"voxel_dim":   [0.5, 0.5, 0.5],
-                #"voxel_dim":    [1, 1, 1],
+                "voxel_dim":    [1, 1, 1],
                 },
         "generate_drr_projections": True,
         }
@@ -117,21 +117,21 @@ def applyDRRlabel_nifti(label_nii):
     sagittal_depth_map = torch.zeros([sagittal_rotated_volume.shape[0], sagittal_rotated_volume.shape[1]], dtype=torch.float32)
 
     # Iterate through the slices of the volume and update the depth map
-    for i in reversed(range(axial_rotated_volume.shape[0])):
+    for i in reversed(range(label.shape[0])):
         slice_ = axial_rotated_volume[i]
         depth_value = 1 - i / (axial_rotated_volume.shape[0] - 1)
         axial_depth_map[slice_ > 0] = depth_value
 
     axial_depth_map = axial_depth_map.flip(0).cpu().numpy()
 
-    for i in reversed(range(coronal_rotated_volume.shape[0])):
+    for i in reversed(range(label.shape[0])):
         slice_ = coronal_rotated_volume[i]
         depth_value = 1 - i / (coronal_rotated_volume.shape[0] - 1)
         coronal_depth_map[slice_ > 0] = depth_value
     
     coronal_depth_map = coronal_depth_map.flip(0).cpu().numpy()
     
-    for i in reversed(range(sagittal_rotated_volume.shape[0])):
+    for i in reversed(range(label.shape[0])):
         slice_ = sagittal_rotated_volume[i]
         depth_value = 1 - i / (sagittal_rotated_volume.shape[0] - 1)
         sagittal_depth_map[slice_ > 0] = depth_value
@@ -173,7 +173,9 @@ def resample_nifti(img_nii, label_nii, target_shape, target_voxel_dim):
     cropped_resampled_data = np.zeros(target_shape)
     for i in range(3):  # Iterate over the three dimensions
         if target_shape[i] < img_resampled.shape[i]:  # Crop if needed
-            crop_start = (img_resampled.shape[i] - target_shape[i]) // 2
+            crop_amount = (img_resampled.shape[i] - target_shape[i]) / 2
+            crop_start = int(np.floor(crop_amount))
+
             if i == 0:
                 img_resampled = img_resampled[crop_start:crop_start+target_shape[i], :, :]
                 label_resampled = label_resampled[crop_start:crop_start+target_shape[i], :, :]
@@ -183,12 +185,23 @@ def resample_nifti(img_nii, label_nii, target_shape, target_voxel_dim):
             else:
                 img_resampled = img_resampled[:, :, crop_start:crop_start+target_shape[i]]
                 label_resampled = label_resampled[:, :, crop_start:crop_start+target_shape[i]]
+        
         elif target_shape[i] > img_resampled.shape[i]:  # Pad if needed
-            pad_amount = (target_shape[i] - img_resampled.shape[i]) // 2
+            pad_amount = (target_shape[i] - img_resampled.shape[i]) / 2
             npad = [(0, 0)] * 3
             npad[i] = (pad_amount, pad_amount)
-            img_resampled = np.pad(img_resampled, pad_width=npad, mode='constant', constant_values=0)
-            label_resampled = np.pad(label_resampled, pad_width=npad, mode='constant', constant_values=0)
+            if i == 0:
+                img_resampled = np.pad(img_resampled, ((np.floor(pad_amount).astype(int), np.ceil(pad_amount).astype(int)), (0, 0), (0, 0)), mode='constant', constant_values=0)
+                label_resampled = np.pad(label_resampled, ((np.floor(pad_amount).astype(int), np.ceil(pad_amount).astype(int)), (0, 0), (0, 0)), mode='constant', constant_values=0)
+            elif i == 1:
+                img_resampled = np.pad(img_resampled, ((0, 0), (np.floor(pad_amount).astype(int), np.ceil(pad_amount).astype(int)), (0, 0)), mode='constant', constant_values=0)
+                label_resampled = np.pad(label_resampled, ((0, 0), (np.floor(pad_amount).astype(int), np.ceil(pad_amount).astype(int)), (0, 0)), mode='constant', constant_values=0)
+            else:
+                img_resampled = np.pad(img_resampled, ((0, 0), (0, 0), (np.floor(pad_amount).astype(int), np.ceil(pad_amount).astype(int))), mode='constant', constant_values=0)
+                label_resampled = np.pad(label_resampled, ((0, 0), (0, 0), (np.floor(pad_amount).astype(int), np.ceil(pad_amount).astype(int))), mode='constant', constant_values=0)
+
+    assert tuple(img_resampled.shape) == tuple(target_shape), f"Resampled image shape {img_resampled.shape} does not match target shape {target_shape}"
+    assert tuple(label_resampled.shape) == tuple(target_shape), f"Resampled label shape {label_resampled.shape} does not match target shape {target_shape}"
 
     # Create a new NIfTI image with the resampled data
     new_header = img_nii.header.copy()
@@ -234,10 +247,6 @@ def main():
     # -------- Preprocessing train loop --------
     for i, data in enumerate(train_indices):
         print(f"Processing train sample {i+1}/{len(train_indices)}")
-    
-        #AVOID FIRST 75 SAMPLES
-        if i < 75:
-            continue
             
         #-------- Load data --------
         # Get the image and label file paths
@@ -263,6 +272,7 @@ def main():
         # Save as nifti
         nib.save(img_nii, os.path.join(output_folder, "imagesTr", f'{image_filenames.iloc[data]}.img.nii.gz'))
         nib.save(label_nii, os.path.join(output_folder, "labelsTr", f'{image_filenames.iloc[data]}.label.nii.gz'))
+
         if preprocessing_config["generate_drr_projections"]:
             imageio.imwrite(os.path.join(output_folder, "imagesTr", f'{image_filenames.iloc[data]}_axial.tiff'), drr_axial, format="tiff")
             imageio.imwrite(os.path.join(output_folder, "imagesTr", f'{image_filenames.iloc[data]}_coronal.tiff'), drr_coronal, format="tiff")
@@ -271,6 +281,48 @@ def main():
             imageio.imwrite(os.path.join(output_folder, "labelsTr", f'{image_filenames.iloc[data]}_axial.tiff'), drr_axial_label, format="tiff")
             imageio.imwrite(os.path.join(output_folder, "labelsTr", f'{image_filenames.iloc[data]}_coronal.tiff'), drr_coronal_label, format="tiff")
             imageio.imwrite(os.path.join(output_folder, "labelsTr", f'{image_filenames.iloc[data]}_sagittal.tiff'), drr_sagittal_label, format="tiff")
+
+
+
+    # -------- Preprocessing test loop --------
+
+    for i, data in enumerate(test_indices):
+        print(f"Processing test sample {i+1}/{len(test_indices)}")
+
+        #-------- Load data --------
+        # Get the image and label file paths
+        img_path = os.path.join(directory, f'{image_filenames.iloc[data]}.img.nii.gz')
+        label_path = os.path.join(directory, f'{image_filenames.iloc[data]}.label.nii.gz')
+
+        # Load the image and label using nibabel
+        img_nii = nib.load(img_path)
+        label_nii = nib.load(label_path)
+
+        #-------- Preprocessing --------
+        # Resample the image and label to the desired voxel dimensions
+        if preprocessing_config["resample"]["active"]:
+            img_nii, label_nii = resample_nifti(img_nii, label_nii, 
+                                                preprocessing_config["resample"]["shape"],
+                                                preprocessing_config["resample"]["voxel_dim"])
+        # Create DRRs
+        if preprocessing_config["generate_drr_projections"]:
+            drr_axial, drr_coronal, drr_sagittal = applyDRR_nifti(img_path, img_nii.shape[:2])
+            drr_axial_label, drr_coronal_label, drr_sagittal_label = applyDRRlabel_nifti(label_nii)
+
+        #-------- Save preprocessed data --------
+        # Save as nifti
+        nib.save(img_nii, os.path.join(output_folder, "imagesTs", f'{image_filenames.iloc[data]}.img.nii.gz'))
+        nib.save(label_nii, os.path.join(output_folder, "labelsTs", f'{image_filenames.iloc[data]}.label.nii.gz'))
+
+        if preprocessing_config["generate_drr_projections"]:
+            imageio.imwrite(os.path.join(output_folder, "imagesTs", f'{image_filenames.iloc[data]}_axial.tiff'), drr_axial, format="tiff")
+            imageio.imwrite(os.path.join(output_folder, "imagesTs", f'{image_filenames.iloc[data]}_coronal.tiff'), drr_coronal, format="tiff")
+            imageio.imwrite(os.path.join(output_folder, "imagesTs", f'{image_filenames.iloc[data]}_sagittal.tiff'), drr_sagittal, format="tiff")
+
+            imageio.imwrite(os.path.join(output_folder, "labelsTs", f'{image_filenames.iloc[data]}_axial.tiff'), drr_axial_label, format="tiff")
+            imageio.imwrite(os.path.join(output_folder, "labelsTs", f'{image_filenames.iloc[data]}_coronal.tiff'), drr_coronal_label, format="tiff")
+            imageio.imwrite(os.path.join(output_folder, "labelsTs", f'{image_filenames.iloc[data]}_sagittal.tiff'), drr_sagittal_label, format="tiff")
+
 
     # -------- Save preprocessing config --------
     with open(os.path.join(preprocessing_config["output_folder"], "dataset.json"), 'w') as file:

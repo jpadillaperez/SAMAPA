@@ -3,7 +3,7 @@
 #SBATCH --output=../output/logs/SAMAPA-preprocess-%A.out  # Standard output of the script (Can be absolute or relative path). %A adds the job id to the file name so you can launch the same script multiple times and get different logging files
 #SBATCH --error=../output/logs/SAMAPA-preprocess-%A.err  # Standard error of the script
 #SBATCH --time=2-00:00:00  # Limit on the total run time (format: days-hours:minutes:seconds)
-#SBATCH --gres=gpu:RTX3090:1  # Number of GPUs if needed
+#SBATCH --gres=gpu:1  # Number of GPUs if needed
 #SBATCH --cpus-per-task=1  # Number of CPUs (Don't use more than 12 per GPU)
 #SBATCH --mem=32G  # Memory in GB (Don't use more than 48G per GPU unless you absolutely need it and know what you are doing)
 
@@ -22,7 +22,7 @@ done
 source /home/guests/jorge_padilla/miniconda3/etc/profile.d/conda.sh
 
 # activate corresponding environment
-conda deactivate # If you launch your script from a terminal where your environment is already loaded, conda won't activate the environment. This guards against that. Not necessary if you always run this script from a clean terminal
+conda deactivate 
 conda activate samapa
 
 #check if package is already in PYTHONPATH
