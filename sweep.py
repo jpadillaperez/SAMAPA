@@ -15,126 +15,10 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
 from datasets import ImageCASDataset, HepaticVesselDataset
-from utils.config import train_config
+from utils.config import train_config, sweep_config
 from utils.wandb import save2DImagetoWandb
 from model.SAMAPA import SAMAPA
-
-class SAMAPA_trainer(pl.LightningModule):
-    def __init__(self, config, model, loss_function, metrics):
-        super().__init__()
-        self.save_hyperparameters(config)
-
-        # Define the model, loss function and metrics
-        self.model = model
-        self.loss_function = loss_function
-        self.metrics = metrics
-        self.sigmoid = nn.Sigmoid()
-
-#-----------------Lightning Module-----------------#
-    def forward(self, x):
-        return self.model(x)
-
-
-    def training_step(self, batch, batch_idx):
-        image, label, drr_axial, drr_coronal, drr_sagittal, drr_axial_label, drr_coronal_label, drr_sagittal_label = batch
-        # Prepare the input dictionary
-        input = {
-            'image': image,
-            'drr_axial': drr_axial,
-            'drr_coronal': drr_coronal,
-            'drr_sagittal': drr_sagittal,
-            'drr_axial_label': drr_axial_label,
-            'drr_coronal_label': drr_coronal_label,
-            'drr_sagittal_label': drr_sagittal_label
-        }
-
-        with autocast():
-            output = self(input)
-            output = self.sigmoid(output)
-            output = (output > 0.8).float()
-        
-        targets = (input['drr_' + self.hparams["projection"] + '_label'] > 0).int()
-        loss = self.loss_function(output, targets)
-
-        self.log('train_loss', loss, on_step=False, on_epoch=True)
-
-
-    def validation_step(self, batch, batch_idx):
-        image, label, drr_axial, drr_coronal, drr_sagittal, drr_axial_label, drr_coronal_label, drr_sagittal_label = batch
-
-        input = {
-            'image': image,
-            'drr_axial': drr_axial,
-            'drr_coronal': drr_coronal,
-            'drr_sagittal': drr_sagittal,
-            'drr_axial_label': drr_axial_label,
-            'drr_coronal_label': drr_coronal_label,
-            'drr_sagittal_label': drr_sagittal_label
-        }
-
-        with autocast():
-            output = self(input)
-            output = self.sigmoid(output)
-            output = (output > 0.8).float()
-
-        targets = (input['drr_' + self.hparams["projection"] + '_label'] > 0).int().to(self.device)
-        
-        val_loss = self.loss_function(output, targets)
-
-        #Iterate over metrics
-        for name, func in self.metrics.items():
-            score = func(output.squeeze(0), targets.squeeze(0))
-            self.log(f'val_{name}', score, on_step=False, on_epoch=True)
-
-        if batch_idx == 0:
-            save2DImagetoWandb((output[0]), f"Val_Output_{self.hparams['projection']}")
-            save2DImagetoWandb(targets[0], f"Val_Target_{self.hparams['projection']}")
-
-        self.log('val_loss', val_loss, on_step=False, on_epoch=True)
-
-
-
-    def configure_optimizers(self):
-        if self.hparams["optimizer"] == "AdamW":
-            optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams["lr"])
-        elif self.hparams["optimizer"] == "Adam":
-            optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams["lr"])
-        elif self.hparams["optimizer"] == "SGD":
-            optimizer = torch.optim.SGD(self.parameters(), lr=self.hparams["lr"], momentum=0.9)
-
-    
-        if self.hparams["lr_scheduler"]["type"] == "CosineAnnealingLR":
-            scheduler = {
-                'scheduler': torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.hparams["lr_scheduler"]['T_max'], eta_min=self.hparams["lr_scheduler"]['eta_min'], last_epoch=-1),
-                'interval': 'epoch',
-                'frequency': 1,
-            }
-        
-        elif self.hparams["lr_scheduler"]["type"] == "StepLR":
-            scheduler = {
-                'scheduler': torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.hparams["lr_scheduler"]['step_size'], gamma=self.hparams["lr_scheduler"]['gamma'], last_epoch=-1),
-                'interval': 'epoch',
-                'frequency': 1,
-            }
-
-        elif self.hparams["lr_scheduler"]["type"] == "MultiStepLR":
-            scheduler = {
-                'scheduler': torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=self.hparams["lr_scheduler"]['multistep_milestones'], gamma=self.hparams["lr_scheduler"]['multistep_gamma'], last_epoch=-1),
-                'interval': 'epoch',
-                'frequency': 1,
-            }
-
-        elif self.hparams["lr_scheduler"]["type"] == "ReduceLROnPlateau":
-            scheduler = {
-                'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=self.hparams["lr_scheduler"]['reduce_factor'], patience=self.hparams["lr_scheduler"]['reduce_patience'], verbose=True),
-                'monitor': self.hparams["lr_scheduler"]['reduce_monitor'],
-                'interval': 'epoch',
-                'frequency': 1 if self.hparams["lr_scheduler"]['reduce_monitor'] == "val_loss" else self.hparams['val_freq'],
-                'strict': True,
-            }
-
-        return [optimizer], [scheduler]
-
+from train import SAMAPA_trainer
 
 def main():
     # ------- Set seeds for reproducibility --------
@@ -149,8 +33,14 @@ def main():
         train_config["device"] = "cpu"
         print("--------- Using CPU")
 
-    # -------- Initialize Weights and Biases --------
-    wandb_logger = WandbLogger(project="SAMAPAUNet", config=train_config)
+    # ------- Initialize Weights and Biases --------
+    wandb.init(config=train_config)
+    wandb_logger = WandbLogger(project="SAMAPAUNet", config=wandb.config)
+
+    for key, value in wandb.config.items():
+        train_config[key] = value
+
+    print("--------- Using sweep config: ", train_config)
 
     # -------- Load data --------
     if train_config["dataset"] == 'ImageCAS':
@@ -257,6 +147,10 @@ def main():
     trainer.fit(model, train_loader, val_loader)
 
     wandb.finish()
+    
+
 
 if __name__ == "__main__":
-    main()
+    # -------- Initialize Weights and Biases --------
+    sweep_id = wandb.sweep(sweep=sweep_config, project="SAMAPAUNet")
+    wandb.agent(sweep_id, function=main)

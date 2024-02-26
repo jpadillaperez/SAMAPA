@@ -1,1 +1,1 @@
-from .SAMAPAUNet import SAMAPAUNet
+from .SAMAPA import SAMAPA

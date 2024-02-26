@@ -1,31 +1,37 @@
 train_config = {
-        "model_name":   "SAMAPAUNet",
+        "projection":   "axial",
         "dataset":      "ImageCAS",
-        "data_path":    "/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128",
-        "scheduler":    "MultiStepLR",
+        "data_path":    "/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128_debug",
         "loss":         "DiceCE",
-        "metric":       "Dice",
+        "metric":       ["Dice", "Precision", "Recall"],
         "optimizer":    "Adam",
         "lr":           0.001,
-        "epochs":       30,
-        "val_interval": 10,
+        "lr_scheduler":  {
+                "type":         "StepLR",
+                "step_size":    50,
+                "gamma":        0.1
+                },
+        "epochs":       200,
         "batch_size":   1,
         "num_workers":  1,
+        "max_dec_iter": 1,
+        "points_per_iter": 1,
         "input_shape":  (128, 128, 128),
         "in_ch":        1,
         "class_num":    1,
         "val_split":    0.2,
-        "resume":       None,
-        "label_value":  1,
-        "partial_train": ["axial"],
-        "debugging_mode": {
-                "active":        True,
-                "data_path":    "/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128_debug",
-                "epochs":       200,
-                "val_interval": 5,
-                },
+        "val_freq":     10,
+        "verbose":      True,
         "output_folder":"/home/guests/jorge_padilla/code/Guided_Research/SAMAPA/output",
         "SAM_checkpoint":"/home/guests/jorge_padilla/models/SAM/sam_vit_b_01ec64.pth"
+}
+
+sweep_config = {
+        "method": "bayes",
+        "metric": {"name": "val_dice_mean", "goal": "maximize"},
+        "parameters": {
+                "lr": {"values": [0.0001, 0.001, 0.01, 0.1, 1]},
+        }
 }
 
 test_config = {

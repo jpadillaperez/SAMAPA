@@ -1,17 +1,18 @@
 import os
 import sys
-import pandas as pd
+import torch
 import numpy as np
+import pandas as pd
 from PIL import Image
 import nibabel as nib
-import torch
-from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader, random_split
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from transforms import NormalizeCustom, RemoveOutliers
 
 dataset_info = {
-    "ImageCAS": {
+    "stats": {
         "mean": -185.3538055419922,
         "std": 439.9675598144531,
     },
@@ -23,7 +24,6 @@ class ImageCASDataset(Dataset):
 
         Args:
             data_path (string): Path to the dataset folder.
-            transform (callable, optional): Optional transform to be applied on a sample.
             mode (string, optional): Whether to use the training or validation dataset.
         """
         self.data_path = data_path
@@ -31,8 +31,8 @@ class ImageCASDataset(Dataset):
 
         self.nii_transform = transforms.Compose([
             transforms.ToTensor(),
-            NormalizeCustom(mean=dataset_info["ImageCAS"]["mean"], std=dataset_info["ImageCAS"]["std"]),
-            RemoveOutliers(mean=dataset_info["ImageCAS"]["mean"], std=dataset_info["ImageCAS"]["std"]),
+            NormalizeCustom(mean=dataset_info["stats"]["mean"], std=dataset_info["stats"]["std"]),
+            RemoveOutliers(mean=dataset_info["stats"]["mean"], std=dataset_info["stats"]["std"]),
         ])
 
         self.drr_transform = transforms.Compose([
@@ -81,29 +81,19 @@ class ImageCASDataset(Dataset):
         return len(self.nii_files)
 
     def __getitem__(self, idx):
-        """Return the drr at the given index."""
-
-        # Get the paths for the image and label
-        nii_path = self.nii_files[idx]
-        label_path = self.labels[idx]
-        drr_axial_path = self.drr_axial_path[idx]
-        drr_coronal_path = self.drr_coronal_path[idx]
-        drr_sagittal_path = self.drr_sagittal_path[idx]
-        drr_axial_label_path = self.drr_axial_label_path[idx]
-        drr_coronal_label_path = self.drr_coronal_label_path[idx]
-        drr_sagittal_label_path = self.drr_sagittal_label_path[idx]
-
+        """Return the image and label for the given index."""
+        
         # Load the image and label using nibabel
-        image = nib.load(nii_path).get_fdata()
-        label = nib.load(label_path).get_fdata()
+        image = nib.load(self.nii_files[idx]).get_fdata()
+        label = nib.load(self.labels[idx]).get_fdata()
 
         # Load the DRRs using PIL to numpy
-        drr_axial = np.array(Image.open(drr_axial_path))
-        drr_coronal = np.array(Image.open(drr_coronal_path))
-        drr_sagittal = np.array(Image.open(drr_sagittal_path))
-        drr_axial_label = np.array(Image.open(drr_axial_label_path))
-        drr_coronal_label = np.array(Image.open(drr_coronal_label_path))
-        drr_sagittal_label = np.array(Image.open(drr_sagittal_label_path))
+        drr_axial = np.array(Image.open(self.drr_axial_path[idx]))
+        drr_coronal = np.array(Image.open(self.drr_coronal_path[idx]))
+        drr_sagittal = np.array(Image.open(self.drr_sagittal_path[idx]))
+        drr_axial_label = np.array(Image.open(self.drr_axial_label_path[idx]))
+        drr_coronal_label = np.array(Image.open(self.drr_coronal_label_path[idx]))
+        drr_sagittal_label = np.array(Image.open(self.drr_sagittal_label_path[idx]))
 
         # Apply the transforms to the images
         image = self.nii_transform(image).unsqueeze(0)
@@ -118,7 +108,6 @@ class ImageCASDataset(Dataset):
         drr_sagittal_label = torch.from_numpy(drr_sagittal_label).unsqueeze(0)
         
         return [image, label, drr_axial, drr_coronal, drr_sagittal, drr_axial_label, drr_coronal_label, drr_sagittal_label]
-
 
 def main():
     ##Instantiate the dataset and dataloader

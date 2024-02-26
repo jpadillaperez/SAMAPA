@@ -1,145 +1,116 @@
-# -*- coding:utf-8 -*-
-# Author: Yuncheng Jiang, Zixun Zhang
-
 import os
+import sys
 import torch
 import numpy as np
+import pandas as pd
+from PIL import Image
 import nibabel as nib
-import random
-from utils.config import train_config
-from monai.data import CacheDataset, ThreadDataLoader
-from einops import rearrange
-import torchvision.transforms as transforms
-from scipy.ndimage import zoom
+from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader, random_split
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from transforms import NormalizeCustom, RemoveOutliers
+
+#TODO: Calculate the mean and std of the dataset
+dataset_info = {
+    "stats": {
+        "mean": -185.3538055419922,
+        "std": 439.9675598144531,
+    },
+    "labelmap": {
+        "background": 0,
+        "vessel": 1,
+        "tumour": 2,
+    }
+}
+
 class HepaticVesselDataset(Dataset):
-    def __init__(self, config):
-        self.config = config
-        self.data_dir = config["data_path"]
+    def __init__(self, data_path, mode="train", label="tumour"):
+        """HepaticVessel dataset.
 
-    def get_loaders(self):
-        def get_sorted_files(subdir):
-            return sorted([f for f in os.listdir(os.path.join(self.data_dir, subdir)) if not f.startswith('.')])
-
-        train_image_ids = get_sorted_files('imagesTr')
-        train_label_ids = get_sorted_files('labelsTr')
-        test_image_ids = get_sorted_files('imagesTs')
-
-        train_val_ids = list(zip(train_image_ids, train_label_ids))
-        random.shuffle(train_val_ids)
-
-        split_idx = int(len(train_val_ids) * self.config["val_split"])
-        train_ids, val_ids = train_val_ids[split_idx:], train_val_ids[:split_idx]
-
-        print('Total Training Samples:', len(train_ids))
-        print('Total Validation Samples:', len(val_ids))
-        print('Total Test Samples:', len(test_image_ids))
-
-        train_ds = CacheDataset(data=train_ids, transform=None, cache_rate=1.0, num_workers=4)
-        val_ds = CacheDataset(data=val_ids, transform=None, cache_rate=1.0, num_workers=4)
-        test_ds = CacheDataset(data=test_image_ids, transform=None, cache_rate=1.0, num_workers=4)
-
-        train_loader = ThreadDataLoader(train_ds, batch_size=self.config["batch_size"], shuffle=True, num_workers=4)
-        val_loader = ThreadDataLoader(val_ds, batch_size=self.config["batch_size"], shuffle=False, num_workers=4)
-        test_loader = ThreadDataLoader(test_ds, batch_size=self.config["batch_size"], shuffle=False, num_workers=4)
-
-        return train_loader, val_loader, test_loader
-
-
-    def get_data(self, pack):
-        target, sample, spacing = [], []
-
-        if train_config["debugging_mode"]["active"]:
-            print("Loading file: ", pack)
-
-        #iterate over the batch size
-        for i in range(train_config["batch_size"]):
-            # Use Nibabel to load NIfTI files
-            data_path = os.path.join(train_config["data_path"], "imagesTr", pack[0])
-            nifti_data = nib.load(data_path)
-            data = nifti_data.get_fdata()
-
-            target_path = os.path.join(train_config["data_path"], "labelsTr", pack[1])
-            nifti_target_data = nib.load(target_path)
-            target_data = nifti_target_data.get_fdata()
-            
-            # Set the target label value
-            target_data[target_data != train_config["label_value"]] = 0
-
-            #TODO: Specify the transformations to be applied through the config file
-            #TODO: Apply the transformations in preprocessing step
-
-            # Pad the data and target to the desired input shape
-            #data = padding(data, train_config["input_shape"])
-            #target_data = padding(target_data, train_config["input_shape"])
-
-            # Normalize the spacing
-            data, new_spacing = normalize_spacing(data, nifti_data.header.get_zooms())[0]
-            target_data, new_spacing  = normalize_spacing(target_data, nifti_target_data.header.get_zooms())[0]
-            
-            # Append the data and target
-            sample.append(data)
-            target.append(target_data)
-            spacing.append(new_spacing)
-
-        samples = torch.from_numpy(reformat_dim(np.array(sample))).to(torch.float32)
-        targets = torch.from_numpy(reformat_dim(np.array(target))).to(torch.float32)
-        spacing = torch.from_numpy(np.array(spacing)).to(torch.float32)
-
-        return samples, targets, spacing
-
-
-    def reformat_dim(self, data):
+        Args:
+            data_path (string): Path to the dataset folder.
+            mode (string, optional): Whether to use the training or validation dataset.
+            label (string, optional): The label to use for the dataset.
         """
-        Adds a channel dimension to the data if it doesn't have one.
-        """
-        if data.ndim == 3:  # Assuming [height, width, depth]
-            data = data[np.newaxis, ...]  # Add a channel dimension at the start
-            data = data[np.newaxis, ...]  # Add a batch dimension at the start
-        elif data.ndim == 4:  # Assuming [batch, height, width, depth]
-            data = data[np.newaxis, ...]
-        elif data.ndim == 5:  # Assuming [batch, channel, height, width, depth]
-            pass
+        self.data_path = data_path
+        self.mode = mode
+        self.label_value = dataset_info["labelmap"][label]
+
+        self.nii_transform = transforms.Compose([
+            transforms.ToTensor(),
+            NormalizeCustom(mean=dataset_info["stats"]["mean"], std=dataset_info["stats"]["std"]),
+            RemoveOutliers(mean=dataset_info["stats"]["mean"], std=dataset_info["stats"]["std"]),
+        ])
+
+        self.drr_transform = transforms.Compose([
+            transforms.ToTensor(),
+            NormalizeCustom(),
+            RemoveOutliers(),
+        ])
+
+        if self.mode == "train":
+            # Get the image and label file paths for the training dataset filter .img.nii.gz
+            nii_path = os.path.join(self.data_path, 'imagesTr')
+            files = [f for f in os.listdir(nii_path) if (f.endswith('.nii.gz') and not f.startswith('.'))]
+            self.nii_files = [os.path.join(nii_path, file) for file in files]
+            self.drr_axial_path = [file.replace('.nii.gz', '_axial.tiff') for file in self.nii_files]
+            self.drr_coronal_path = [file.replace('.nii.gz', '_coronal.tiff') for file in self.nii_files]
+            self.drr_sagittal_path = [file.replace('.nii.gz', '_sagittal.tiff') for file in self.nii_files]
+
+            nii_path = os.path.join(self.data_path, 'labelsTr')
+            files = [f for f in os.listdir(nii_path) if (f.endswith('.nii.gz') and not f.startswith('.'))]
+            self.labels = [os.path.join(nii_path, file) for file in files]
+            self.drr_axial_label_path = [file.replace('.nii.gz', '_axial.tiff') for file in self.labels]
+            self.drr_coronal_label_path = [file.replace('.nii.gz', '_coronal.tiff') for file in self.labels]
+            self.drr_sagittal_label_path = [file.replace('.nii.gz', '_sagittal.tiff') for file in self.labels]
+        
+        elif self.mode == "test":
+            # Get the image file paths for the test dataset
+            nii_path = os.path.join(self.data_path, 'imagesTs')
+            files = [f for f in os.listdir(nii_path) if (f.endswith('.nii.gz') and not f.startswith('.'))]
+            self.nii_files = [os.path.join(nii_path, file) for file in files]
+            self.drr_axial_path = [file.replace('.nii.gz', '_axial.tiff') for file in self.nii_files]
+            self.drr_coronal_path = [file.replace('.nii.gz', '_coronal.tiff') for file in self.nii_files]
+            self.drr_sagittal_path = [file.replace('.nii.gz', '_sagittal.tiff') for file in self.nii_files]
+
         else:
-            raise ValueError(f"Unexpected number of dimensions in data: {data.ndim}")
-        return data
+            raise ValueError(f"Invalid mode: {self.mode}")
 
 
-    def padding(self, sample, input_shape=None):
-        """
-        Pads the sample to the desired input shape.
-        """
-        if input_shape is None:
-            input_shape = self.config["input_shape"]
+    def __len__(self):
+        """Return the length of the dataset."""
+        return len(self.nii_files)
+        
 
-        # Check dimensions and adjust padding accordingly
-        pad_width_sample = [(0, 0)] * sample.ndim
+    def __getitem__(self, idx):
+        """Return the image and label for the given index."""
 
-        # Update padding for spatial dimensions
-        for i in range(-3, 0):  # Last 3 dimensions are spatial dimensions
-            pad_width_sample[i] = (max((input_shape[i] - sample.shape[i]) // 2, 0), 
-                                max((input_shape[i] - sample.shape[i] + 1) // 2, 0))
+        # Load the image and label using nibabel
+        image = nib.load(self.nii_files[idx]).get_fdata()
+        label = nib.load(self.labels[idx]).get_fdata()
 
-        sample_padded = np.pad(sample, pad_width_sample, mode='constant', constant_values=0)
+        # Set the target label value
+        label[label != train_config["label_value"]] = 0
 
-        return sample_padded
+        # Load the DRRs using PIL to numpy
+        drr_axial = np.array(Image.open(self.drr_axial_path[idx]))
+        drr_coronal = np.array(Image.open(self.drr_coronal_path[idx]))
+        drr_sagittal = np.array(Image.open(self.drr_sagittal_path[idx]))
+        drr_axial_label = np.array(Image.open(self.drr_axial_label_path[idx]))
+        drr_coronal_label = np.array(Image.open(self.drr_coronal_label_path[idx]))
+        drr_sagittal_label = np.array(Image.open(self.drr_sagittal_label_path[idx]))
 
+        # Apply the transforms to the images
+        image = self.nii_transform(image).unsqueeze(0)
+        drr_axial = self.drr_transform(drr_axial).unsqueeze(0)
+        drr_coronal = self.drr_transform(drr_coronal).unsqueeze(0)
+        drr_sagittal = self.drr_transform(drr_sagittal).unsqueeze(0)
 
-    def normalize_spacing(self, volume, org_spacing, new_spacing=np.array([1, 1, 1])):
-        """
-        Normalize the spacing to 1mm x 1mm x 1mm
-        """
-
-        from scipy.ndimage import zoom
-        resize_factor = org_spacing / new_spacing
-        new_real_shape = volume.shape * resize_factor
-        new_shape = np.round(new_real_shape)
-        real_resize_factor = new_shape / volume.shape
-        new_spacing = org_spacing / real_resize_factor
-        volume = zoom(volume, real_resize_factor, mode='bilinear')
-
-        print("New shape:", volume.shape)
-        print("New spacing:", new_spacing)
-
-        return volume, new_spacing
+        # Convert the label to a tensor
+        label = torch.from_numpy(label).unsqueeze(0)
+        drr_axial_label = torch.from_numpy(drr_axial_label).unsqueeze(0)
+        drr_coronal_label = torch.from_numpy(drr_coronal_label).unsqueeze(0)
+        drr_sagittal_label = torch.from_numpy(drr_sagittal_label).unsqueeze(0)
+        
+        return [image, label, drr_axial, drr_coronal, drr_sagittal, drr_axial_label, drr_coronal_label, drr_sagittal_label]

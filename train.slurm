@@ -24,7 +24,8 @@ source /home/guests/jorge_padilla/miniconda3/etc/profile.d/conda.sh
 export WANDB_API_KEY=$(cat ./wandb_api_key.txt)
 
 # activate corresponding environment
-conda deactivate && conda activate samapa
+conda deactivate 
+conda activate samapa
 
 python -u ./train.py
 

@@ -1,16 +1,17 @@
 import os
+import torch
 import wandb
 import imageio
 import numpy as np
 import nibabel as nib
-import torch
 from torch import nn
+import pytorch_lightning as pl
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from functools import partial
 from einops import rearrange
 from typing import Any, Optional, Tuple
-from utils.config import train_config, test_config
+
 from model.sam.image_encoder import ImageEncoderViT
 from model.sam.prompt_encoder import PromptEncoder
 from model.sam.mask_decoder import MaskDecoder
@@ -18,78 +19,65 @@ from model.sam.transformer import TwoWayTransformer
 
 from utils.wandb import save3DImagetoWandb, save2DImagetoWandb
 
-class SAMAPAUNet(nn.Module):
-    def __init__(self, partial_train = ["axial", "coronal", "sagittal"]):
-        super(SAMAPAUNet, self).__init__()
+class SAMAPA(pl.LightningModule):
+    def __init__(self, config):
+        super().__init__()
+        self.save_hyperparameters(config)
 
-        self.encoder = APAEncoder(partial_train=partial_train)
-        self.partial_train = partial_train
-        self.full_training = (partial_train == ["axial", "coronal", "sagittal"])
-
-        if self.full_training:
-            self.mlp_decoder = MLP(input_size=train_config["input_shape"][0] * train_config["input_shape"][1] * 3,
-                                output_size=train_config["input_shape"][0] * train_config["input_shape"][1] * train_config["input_shape"][2])
+        self.encoder = APAEncoder(config)
+        if (self.hparams["projection"] == ["full"]):
+            self.mlp_decoder = MLP(input_size=self.hparams["input_shape"][0] * self.hparams["input_shape"][1] * 3,
+                                output_size=self.hparams["input_shape"][0] * self.hparams["input_shape"][1] * self.hparams["input_shape"][2])
 
     def forward(self, x):
-        self.axial_out, self.coronal_out, self.sagittal_out = self.encoder(x)
+        self.proj_out = self.encoder(x)
 
-        if self.full_training:
+        if (self.hparams["projection"] == ["full"]):
             input_mlp = torch.cat((h_attn, w_attn, d_attn), dim=1)
             out = self.mlp_decoder(input_mlp.view(input_mlp.size(0), -1).float())
-            out = out.view(out.size(0), 1, train_config["input_shape"][0], train_config["input_shape"][1], train_config["input_shape"][2])
+            out = out.view(out.size(0), 1, self.hparams["input_shape"][0], self.hparams["input_shape"][1], self.hparams["input_shape"][2])
         else:
-            if "axial" in self.partial_train:
-                out = self.axial_out
-            elif "coronal" in self.partial_train:
-                out = self.coronal_out
-            elif "sagittal" in self.partial_train:
-                out = self.sagittal_out
+            out = self.proj_out
 
         return out
 
 #-----------------APA Encoder-----------------#
-class APAEncoder(nn.Module):
-    def __init__(self, partial_train = ["axial", "coronal", "sagittal"]):
-        super(APAEncoder, self).__init__()
-        self.partial_train = partial_train
-        
-        for proj in partial_train:
-            setattr(self, proj + "_att", APA(projection=proj))
-        
+
+class APAEncoder(pl.LightningModule):
+    def __init__(self, config):
+        super().__init__()
+        self.save_hyperparameters(config)
+
+        self.partial_attn = APA(config)
+
     def forward(self, input):
-        self.axial_attn = None
-        self.coronal_attn = None
-        self.sagittal_attn = None
-
-        for proj in self.partial_train:
-            attn = getattr(self, proj + "_att")(input)
-            setattr(self, proj + "_attn", attn)
-
-        return self.axial_attn, self.coronal_attn, self.sagittal_attn
+        attn = self.partial_attn(input)
+        return attn
 
 #-----------------Axial Attention Modules-----------------#
 #TODO: The modules could be the same #DONE
 #TODO: We could optimize the number of them by doing DRR on the fly
 
-class APA(nn.Module):
-    def __init__(self, projection):
-        super(APA, self).__init__()
-        self.projection = projection.lower()
-        self.attention = InnerBlock(projection)
+class APA(pl.LightningModule):
+    def __init__(self, config):
+        super().__init__()
+        self.save_hyperparameters(config)
+        self.attention = InnerBlock(config)
 
     def forward(self, input):
-        self.drr = input["drr_" + self.projection]
-        self.drr_label = input["drr_" + self.projection + "_label"]
+        self.drr = input["drr_" + self.hparams["projection"]]
+        self.drr_label = input["drr_" + self.hparams["projection"] + "_label"]
         attn = self.attention(self.drr, self.drr_label)
         return attn
 
 #----------------- Basic Blocks -----------------#
+class InnerBlock(pl.LightningModule):
+    def __init__(self, config):
+        super().__init__()
+        self.save_hyperparameters(config)
 
-class InnerBlock(nn.Module):
-    def __init__(self, projection):
-        super(InnerBlock, self).__init__()
-        self.projection = projection
-        self.original_size = train_config["input_shape"]
+        self.projection = self.hparams["projection"].lower()
+        self.verbose = self.hparams["verbose"]
 
         #------------------------ SAM Architecture ---------------------------
         self.image_size = 1024
@@ -148,61 +136,77 @@ class InnerBlock(nn.Module):
         drr_label_preprocessed = self.preprocess(drr_label)
 
         image_embeddings = self.image_encoder(drr_preprocessed)
-        points_input, labels_input = self.get_points(torch.zeros_like(drr_label_preprocessed, dtype=torch.float32, device=drr.device), drr_label_preprocessed, num_points=1)
+        points_input, labels_input = self.get_points(torch.zeros_like(drr_label_preprocessed, dtype=torch.float32, device=drr.device), drr_label_preprocessed, num_points=self.hparams["points_per_iter"])
+
+        prev_mask = None
         
-        if train_config["debugging_mode"]["active"]:
+        if self.verbose:
             save2DImagetoWandb(drr_preprocessed[0, 0], f"Input_{self.projection}")
             save2DImagetoWandb(drr_label_preprocessed[0, 0], f"Target_{self.projection}")
             save2DImagetoWandb(image_embeddings[0, 0], f"ImageEmbedding_{self.projection}")
 
-            #Create Input with points
-            input_with_points = drr_preprocessed.clone()
-            for point in points_input:
-                #Set 5 pixels around the point to 1
-                input_with_points[0, 0, int(point[0])-2:int(point[0])+3, int(point[1])-2:int(point[1])+3] = 1
-            save2DImagetoWandb(input_with_points[0, 0], f"InputWithPoints_{self.projection}")
+            ##Create Input with points
+            #input_with_points = drr_preprocessed.clone()
+            #for point in points_input:
+            #    #Set 5 pixels around the point to 1
+            #    input_with_points[0, 0, int(point[0])-2:int(point[0])+3, int(point[1])-2:int(point[1])+3] = 1
+            #save2DImagetoWandb(input_with_points[0, 0], f"InputWithPoints_{self.projection}")
 
         batched_input = {
             "image": drr_preprocessed,
-            "original_size": [self.original_size[0], self.original_size[1]],
+            "original_size": drr_preprocessed.shape[-2:],
             "point_coords": points_input,
             "point_labels": labels_input,
         }
 
         #------------------------ Iteration Prompt and Mask ---------------------------
-        for image_record, curr_embedding in zip(batched_input, image_embeddings):
-            if "point_coords" in image_record:
-                points = (image_record["point_coords"], image_record["point_labels"])
-            else:
-                points = None
+        for it in range(self.hparams["max_dec_iter"]):
+            #print("drr_label_preprocessed: ", drr_label_preprocessed.shape)
+            if ((prev_mask is not None) and (it < self.hparams["max_dec_iter"] - 1)):
+                points_input, labels_input = self.get_points(torch.zeros_like(drr_label_preprocessed, dtype=torch.float32, device=drr.device), drr_label_preprocessed, num_points=self.hparams["points_per_iter"])
+                batched_input["point_coords"] = torch.cat((points_input, batched_input["point_coords"]), dim=1)
+                batched_input["point_labels"] = torch.cat((labels_input, batched_input["point_labels"]), dim=1)
+
+            #print("Points Input: ", batched_input["point_coords"])
+            #print("Labels Input: ", batched_input["point_labels"])
+
+            points = (batched_input["point_coords"], batched_input["point_labels"])
+
             sparse_embeddings, dense_embeddings = self.prompt_encoder(
                 points=points,
                 boxes=None,
-                masks=None,
+                masks=prev_mask,
             )
             
             low_res_masks, iou_predictions = self.mask_decoder(
-                image_embeddings=curr_embedding.unsqueeze(0),
+                image_embeddings=image_embeddings,
                 image_pe=self.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
-                multimask_output=False,
+                multimask_output=False, #multimask_output,
             )
 
-            if train_config["debugging_mode"]["active"]:
-                save2DImagetoWandb(low_res_masks[0, 0], f"LowResMask_{self.projection}")
+            if self.verbose:
+                save2DImagetoWandb(low_res_masks[0, 0], f"LowResMask_{self.projection}_iter_{it}")
 
-            masks = self.postprocess_masks(
-                low_res_masks,
-                input_size=(self.image_encoder.img_size, self.image_encoder.img_size),
-                original_size=(self.original_size[0], self.original_size[1]),
-            )
+            #print("Low Res Mask shape: ", low_res_masks.shape)
 
-            if train_config["debugging_mode"]["active"]:
-                save2DImagetoWandb(masks[0, 0], f"Mask_{self.projection}")
+            prev_mask = low_res_masks
 
-            masks = masks.float()
-        return masks
+        prev_mask = self.postprocess_masks(
+            low_res_masks,
+            input_size=(self.image_encoder.img_size, self.image_encoder.img_size),
+            original_size=drr.shape[-2:],
+        )
+
+        if self.verbose:
+            save2DImagetoWandb(prev_mask[0, 0], f"Mask_{self.projection}_iter_{it}")
+
+        #print("Prev Mask shape: ", prev_mask.shape)
+
+        final_mask = prev_mask.float()
+
+        return final_mask
 
 
     #------------------------ Helper Functions ---------------------------
@@ -288,11 +292,17 @@ class InnerBlock(nn.Module):
             batch_points.append(point_input)
             batch_labels.append(label_input)
 
-        batch_points = torch.stack(batch_points, dim=0)
+        batch_points = torch.stack(batch_points, dim=0).unsqueeze(0)
         batch_labels = torch.stack(batch_labels, dim=0)
+
+        print("Batch Points: ", batch_points)
+        print("Batch Labels: ", batch_labels)
+        print("Batch Points shape: ", batch_points.shape)
+        print("Batch Labels shape: ", batch_labels.shape)
 
         return batch_points, batch_labels
 
+#-----------------Positional Encoding-----------------#
 
 class PositionEmbeddingRandom(nn.Module):
     """
@@ -330,7 +340,7 @@ class PositionEmbeddingRandom(nn.Module):
         pe = self._pe_encoding(torch.stack([x_embed, y_embed], dim=-1))
         return pe.permute(2, 0, 1)  # C x H x W
 
-
+#-----------------MLP-----------------#
 
 class MLP(nn.Module):
     def __init__(self, input_size, output_size):
