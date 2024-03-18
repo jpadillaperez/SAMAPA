@@ -7,8 +7,9 @@ import yaml
 import nibabel as nib
 import pytorch_lightning as pl
 import torch.nn as nn
-from monai.losses import DiceCELoss, DiceCELoss
+from monai.losses import DiceCELoss, DiceLoss
 from torchmetrics import Dice, Precision, Recall, F1Score
+from torchmetrics.image import StructuralSimilarityIndexMeasure, PeakSignalNoiseRatio, RootMeanSquaredErrorUsingSlidingWindow
 from torch.cuda.amp.autocast_mode import autocast
 from torch.utils.data import DataLoader, random_split
 from pytorch_lightning.loggers import WandbLogger
@@ -28,7 +29,6 @@ class SAMAPA_trainer(pl.LightningModule):
         self.model = model
         self.loss_function = loss_function
         self.metrics = metrics
-        self.sigmoid = nn.Sigmoid()
 
 #-----------------Lightning Module-----------------#
     def forward(self, x):
@@ -50,13 +50,21 @@ class SAMAPA_trainer(pl.LightningModule):
 
         with autocast():
             output = self(input)
-            output = self.sigmoid(output)
-            output = (output > 0.8).float()
         
+        #targets = input['drr_' + self.hparams["projection"] + '_label']
         targets = (input['drr_' + self.hparams["projection"] + '_label'] > 0).int()
         loss = self.loss_function(output, targets)
 
+        output = (output > 0.8).float()
+
+        if (batch_idx == 0 and self.current_epoch % 5 == 0):
+            save2DImagetoWandb(output[0], f"Train_Output")
+            save2DImagetoWandb(targets[0], f"Train_Target")
+            save2DImagetoWandb(input["drr_" + self.hparams["projection"]], f"Train_DRR")
+
         self.log('train_loss', loss, on_step=False, on_epoch=True)
+
+        return loss
 
 
     def validation_step(self, batch, batch_idx):
@@ -74,23 +82,28 @@ class SAMAPA_trainer(pl.LightningModule):
 
         with autocast():
             output = self(input)
-            output = self.sigmoid(output)
-            output = (output > 0.8).float()
 
+        #targets = input['drr_' + self.hparams["projection"] + '_label']
         targets = (input['drr_' + self.hparams["projection"] + '_label'] > 0).int().to(self.device)
         
         val_loss = self.loss_function(output, targets)
 
         #Iterate over metrics
         for name, func in self.metrics.items():
-            score = func(output.squeeze(0), targets.squeeze(0))
+            score = func(output, targets)
+            #score = func(output.squeeze(0), targets.squeeze(0))
             self.log(f'val_{name}', score, on_step=False, on_epoch=True)
+        
+        output = (output > 0.8).float()
 
-        if batch_idx == 0:
-            save2DImagetoWandb((output[0]), f"Val_Output_{self.hparams['projection']}")
-            save2DImagetoWandb(targets[0], f"Val_Target_{self.hparams['projection']}")
+        if (batch_idx == 0 and self.current_epoch % 5 == 0):
+            save2DImagetoWandb(output[0], f"Val_Output")
+            save2DImagetoWandb(targets[0], f"Val_Target")
+            save2DImagetoWandb(input["drr_" + self.hparams["projection"]], f"Val_DRR")
 
         self.log('val_loss', val_loss, on_step=False, on_epoch=True)
+
+        return val_loss
 
 
 
@@ -139,7 +152,6 @@ class SAMAPA_trainer(pl.LightningModule):
 def main():
     # ------- Set seeds for reproducibility --------
     pl.seed_everything(1)
-    torch.set_float32_matmul_precision('medium')
 
     # ------- Check if cuda is available --------
     if torch.cuda.is_available():
@@ -151,17 +163,20 @@ def main():
 
     # -------- Initialize Weights and Biases --------
     wandb_logger = WandbLogger(project="SAMAPAUNet", config=train_config)
+    wandb.init(project="SAMAPAUNet", config=train_config)
 
     # -------- Load data --------
     if train_config["dataset"] == 'ImageCAS':
-        train_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="train")
-        train_dataset, val_dataset = random_split(train_dataset, [int((1 - train_config["val_split"]) * len(train_dataset)), int(train_config["val_split"] * len(train_dataset))])
-
+        train_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="train", debug=train_config["debug"])
+        if train_config["debug"]:
+            val_dataset = train_dataset
+        else:
+            train_dataset, val_dataset = random_split(train_dataset, [int((1 - train_config["val_split"]) * len(train_dataset)), int(train_config["val_split"] * len(train_dataset))])
         train_loader = DataLoader(train_dataset, batch_size=train_config["batch_size"], shuffle=True, num_workers=train_config["num_workers"])
         val_loader = DataLoader(val_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=train_config["num_workers"])
-        
-        test_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="test")
+        test_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="test", debug=train_config["debug"])
         test_loader = DataLoader(test_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=train_config["num_workers"])
+
         print("--------- Using ImageCAS dataset")
     elif train_config["dataset"] == 'HepaticVessel':
         raise NotImplementedError
@@ -176,7 +191,7 @@ def main():
     model = SAMAPA(train_config)
 
     # -------- Load pretrained SAM --------
-    if train_config["SAM_checkpoint"] is not None:
+    if ((train_config["SAM_checkpoint"] is not None)):
         print('------------------ Loading pretrained SAM from: ', train_config["SAM_checkpoint"])
         checkpoint = torch.load(train_config["SAM_checkpoint"])
         for name, param in model.named_parameters():
@@ -201,21 +216,35 @@ def main():
             param.requires_grad = True
         elif name.find('image_encoder') != -1:
             param.requires_grad = False
+        #elif name.find('prompt_encoder') != -1:
+        #    param.requires_grad = False
+        #elif name.find('mask_decoder') != -1:
+        #    param.requires_grad = False
         else:
             param.requires_grad = True
 
     # -------- Loss functions --------
     if train_config["loss"] == 'Dice':
-        loss = DiceLoss()
+        loss = DiceLoss(sigmoid=True)
         print('--------- Using Dice Loss')
     elif train_config["loss"] == 'DiceCE':
-        loss = DiceCELoss(to_onehot_y=False)
+        loss = DiceCELoss(sigmoid=True)
         print('--------- Using DiceCE Loss')
+    elif train_config["loss"] == 'MSE':
+        loss = nn.MSELoss()
+        print('--------- Using MSE Loss')
     else:
         raise NotImplementedError
 
     # -------- Metrics --------
     metrics = []
+    if train_config["metric"] is None:
+        print(f'--------- No metrics selected, using default for output type {train_config["output_type"]}')
+        if train_config["output_type"] == "depth_map":
+            train_config["metric"] = ["SSIM", "PSNR", "RMSE"]
+        elif train_config["output_type"] == "segmentation":
+            train_config["metric"] = ["Dice", "Precision", "Recall"]
+
     for metrics_comp in train_config["metric"]:
         if 'Dice' in metrics_comp:
             metrics.append(Dice().to(train_config["device"]))
@@ -229,7 +258,16 @@ def main():
         if 'F1Score' in metrics_comp:
             metrics.append(F1Score(task="binary").to(train_config["device"]))
             print('--------- Using F1Score metric')
-        if metrics_comp not in ['Dice', 'Precision', 'Recall', 'F1Score']:
+        if 'SSIM' in metrics_comp:
+            metrics.append(StructuralSimilarityIndexMeasure().to(train_config["device"]))
+            print('--------- Using SSIM metric')
+        if 'PSNR' in metrics_comp:
+            metrics.append(PeakSignalNoiseRatio().to(train_config["device"]))
+            print('--------- Using PSNR metric')
+        if 'RMSE' in metrics_comp:
+            metrics.append(RootMeanSquaredErrorUsingSlidingWindow().to(train_config["device"]))
+            print('--------- Using RMSE metric')
+        if metrics_comp not in ['Dice', 'Precision', 'Recall', 'F1Score', 'SSIM', 'PSNR', 'RMSE']:
             raise NotImplementedError
 
     metrics = {metric.__class__.__name__: metric for metric in metrics}
@@ -238,21 +276,22 @@ def main():
     model = SAMAPA_trainer(train_config, model, loss, metrics)
 
     # -------- Checkpoint callback --------
-    checkpoint_callback = ModelCheckpoint(monitor='val_loss', save_top_k=1, mode='min', save_last=True, dirpath=wandb_logger.experiment.dir + '/output/checkpoints')
+    os.makedirs(train_config["output_folder"] + "/checkpoints/" + wandb.run.name, exist_ok=True)
+    checkpoint_callback = ModelCheckpoint(monitor='val_loss', save_top_k=1, mode='min', save_last=True, dirpath=train_config["output_folder"] + "/checkpoints/", filename='epoch={epoch}-val_loss={val_loss:.2f}')
 
     # -------- Learning rate monitor --------
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
 
     # -------- Trainer --------
-    trainer = pl.Trainer(   accelerator=train_config["device"],
-                            devices= 1 if train_config["device"] == "cuda" else 0,
-                            max_epochs=train_config["epochs"],
-                            callbacks=[checkpoint_callback, lr_monitor],
-                            logger=wandb_logger,
-                            log_every_n_steps=16,
-                            val_check_interval=train_config["val_freq"],
-
-                            )
+    trainer = pl.Trainer(   
+                        accelerator=train_config["device"],
+                        devices= 1 if train_config["device"] == "cuda" else 0,
+                        max_epochs=train_config["epochs"],
+                        callbacks=[checkpoint_callback, lr_monitor],
+                        logger=wandb_logger,
+                        log_every_n_steps=16,
+                        check_val_every_n_epoch=train_config["val_freq"],
+                        )
 
     trainer.fit(model, train_loader, val_loader)
 

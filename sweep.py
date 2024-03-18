@@ -7,7 +7,7 @@ import yaml
 import nibabel as nib
 import pytorch_lightning as pl
 import torch.nn as nn
-from monai.losses import DiceCELoss, DiceCELoss
+from monai.losses import DiceCELoss, DiceLoss
 from torchmetrics import Dice, Precision, Recall, F1Score
 from torch.cuda.amp.autocast_mode import autocast
 from torch.utils.data import DataLoader, random_split
@@ -23,7 +23,6 @@ from train import SAMAPA_trainer
 def main():
     # ------- Set seeds for reproducibility --------
     pl.seed_everything(1)
-    torch.set_float32_matmul_precision('medium')
 
     # ------- Check if cuda is available --------
     if torch.cuda.is_available():
@@ -44,14 +43,16 @@ def main():
 
     # -------- Load data --------
     if train_config["dataset"] == 'ImageCAS':
-        train_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="train")
-        train_dataset, val_dataset = random_split(train_dataset, [int((1 - train_config["val_split"]) * len(train_dataset)), int(train_config["val_split"] * len(train_dataset))])
-
+        train_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="train", debug=train_config["debug"])
+        if train_config["debug"]:
+            val_dataset = train_dataset
+        else:
+            train_dataset, val_dataset = random_split(train_dataset, [int((1 - train_config["val_split"]) * len(train_dataset)), int(train_config["val_split"] * len(train_dataset))])
         train_loader = DataLoader(train_dataset, batch_size=train_config["batch_size"], shuffle=True, num_workers=train_config["num_workers"])
         val_loader = DataLoader(val_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=train_config["num_workers"])
-        
-        test_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="test")
+        test_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="test", debug=train_config["debug"])
         test_loader = DataLoader(test_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=train_config["num_workers"])
+
         print("--------- Using ImageCAS dataset")
     elif train_config["dataset"] == 'HepaticVessel':
         raise NotImplementedError
@@ -66,7 +67,7 @@ def main():
     model = SAMAPA(train_config)
 
     # -------- Load pretrained SAM --------
-    if train_config["SAM_checkpoint"] is not None:
+    if ((train_config["SAM_checkpoint"] is not None)):
         print('------------------ Loading pretrained SAM from: ', train_config["SAM_checkpoint"])
         checkpoint = torch.load(train_config["SAM_checkpoint"])
         for name, param in model.named_parameters():
@@ -74,32 +75,45 @@ def main():
                 key = "image_encoder." + name.split('image_encoder.')[1]
                 if key.find('MLP_Adapter') != -1 or key.find('Space_Adapter') != -1:
                     continue
+                print('------------------ Loading: ', key)
                 param.data = checkpoint[key]
             elif name.find('prompt_encoder') != -1:
                 key = "prompt_encoder." + name.split('prompt_encoder.')[1]
+                print('------------------ Loading: ', key)
                 param.data = checkpoint[key]
             elif name.find('mask_decoder') != -1:
                 key = "mask_decoder." + name.split('mask_decoder.')[1]
+                print('------------------ Loading: ', key)
                 param.data = checkpoint[key]
 
     # -------- Freeze layers --------
     print('------------------ Freezing layers')
     for name, param in model.named_parameters():
         if name.find('MLP_Adapter') != -1:
+            print('------------------ Unfreezing: ', name)
             param.requires_grad = True
         elif name.find('Space_Adapter') != -1:
+            print('------------------ Unfreezing: ', name)
             param.requires_grad = True
         elif name.find('image_encoder') != -1:
+            print('------------------ Freezing: ', name)
             param.requires_grad = False
+        #elif name.find('prompt_encoder') != -1:
+        #    print('------------------ Freezing: ', name)
+        #    param.requires_grad = False
+        #elif name.find('mask_decoder') != -1:
+        #    print('------------------ Freezing: ', name)
+        #    param.requires_grad = False
         else:
+            print('------------------ Freezing: ', name)
             param.requires_grad = True
 
     # -------- Loss functions --------
     if train_config["loss"] == 'Dice':
-        loss = DiceLoss()
+        loss = DiceLoss(sigmoid=True)
         print('--------- Using Dice Loss')
     elif train_config["loss"] == 'DiceCE':
-        loss = DiceCELoss(to_onehot_y=False)
+        loss = DiceCELoss(sigmoid=True)
         print('--------- Using DiceCE Loss')
     else:
         raise NotImplementedError
@@ -140,7 +154,7 @@ def main():
                             callbacks=[checkpoint_callback, lr_monitor],
                             logger=wandb_logger,
                             log_every_n_steps=16,
-                            val_check_interval=train_config["val_freq"],
+                            check_val_every_n_epoch=train_config["val_freq"],
 
                             )
 

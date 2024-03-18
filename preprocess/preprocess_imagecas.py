@@ -15,7 +15,7 @@ print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024 ** 
 # -------- Preprocessing config --------
 preprocessing_config = {
         "data_raw_path":        '/home/guests/jorge_padilla/data/ImageCAS',
-        "output_folder":        '/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128',
+        "output_folder":        '/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128_angio',
         "split":                1,
         "resample":{
                 "active":       True,
@@ -79,7 +79,7 @@ def main():
                                                 preprocessing_config["resample"]["voxel_dim"])
         # Create DRRs
         if preprocessing_config["generate_drr_projections"]:
-            drr_axial, drr_coronal, drr_sagittal = applyDRR_nifti(img_path, img_nii.shape[:2])
+            drr_axial, drr_coronal, drr_sagittal = applyDRR_nifti(nii_path = img_path, output_shape = img_nii.shape[:2], contrast_path = label_path)
             drr_axial_label, drr_coronal_label, drr_sagittal_label = applyDRRlabel_nifti(label_nii)
 
         #-------- Save preprocessed data --------
@@ -120,7 +120,7 @@ def main():
                                                 preprocessing_config["resample"]["voxel_dim"])
         # Create DRRs
         if preprocessing_config["generate_drr_projections"]:
-            drr_axial, drr_coronal, drr_sagittal = applyDRR_nifti(img_path, img_nii.shape[:2])
+            drr_axial, drr_coronal, drr_sagittal = applyDRR_nifti(nii_path=img_path, output_shape=img_nii.shape[:2], contrast_path=label_path)
             drr_axial_label, drr_coronal_label, drr_sagittal_label = applyDRRlabel_nifti(label_nii)
 
         #-------- Save preprocessed data --------

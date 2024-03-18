@@ -8,21 +8,26 @@ from skimage.transform import resize
 from PIL import Image
 import torch
 
-def applyDRR_nifti(nii_path, output_shape=(512, 512)):
+def applyDRR_nifti(nii_path, output_shape=(512, 512), contrast_path=None):
     """
     Create DRRs from a NIfTI image.
     
     Parameters:
     nii_path (string): The path to the image to create the DRRs from.
     output_shape (tuple): The desired output shape of the DRRs.
+    contrast_path (string): The path to the contrast image to create the DRRs from.
     
     Returns:
     np.array: The DRRs.
     """
 
     #-------- DeepDRR --------
+    contrast = None
+    if contrast_path is not None:
+        contrast = nib.load(contrast_path).get_fdata()
+
     carm = MobileCArm()
-    ct = Volume.from_nifti(nii_path)
+    ct = Volume.from_nifti(path=nii_path, contrast=contrast)
 
     with Projector(ct, carm=carm) as projector:
         # Orient and position the patient model in world space.
@@ -54,7 +59,7 @@ def applyDRR_nifti(nii_path, output_shape=(512, 512)):
         # Undo sagittal rotation
         ct.rotate(sagittal_rotation.inv())
 
-    # Resize to original size
+    # Resize to output size
     drr_axial = resize(drr_axial, output_shape, order=1)
     drr_coronal = resize(drr_coronal, output_shape, order=1)
     drr_sagittal = resize(drr_sagittal, output_shape, order=1)

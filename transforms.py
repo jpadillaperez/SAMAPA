@@ -39,3 +39,11 @@ class RemoveOutliers(torch.nn.Module):
         img[torch.where(img > mean + 3 * std)] = mean + 3 * std
 
         return img
+
+
+class InverseIntensity(torch.nn.Module):
+    def __init__(self):
+        super(InverseIntensity, self).__init__()
+
+    def forward(self, img):
+        return torch.max(img) - img

@@ -9,7 +9,7 @@ from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader, random_split
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from transforms import NormalizeCustom, RemoveOutliers
+from transforms import NormalizeCustom, RemoveOutliers, InverseIntensity
 
 dataset_info = {
     "stats": {
@@ -19,7 +19,7 @@ dataset_info = {
 }
 
 class ImageCASDataset(Dataset):
-    def __init__(self, data_path, mode="train"):
+    def __init__(self, data_path, mode="train", debug=False):
         """ImageCAS dataset.
 
         Args:
@@ -33,6 +33,7 @@ class ImageCASDataset(Dataset):
             transforms.ToTensor(),
             NormalizeCustom(mean=dataset_info["stats"]["mean"], std=dataset_info["stats"]["std"]),
             RemoveOutliers(mean=dataset_info["stats"]["mean"], std=dataset_info["stats"]["std"]),
+            #InverseIntensity(),
         ])
 
         self.drr_transform = transforms.Compose([
@@ -46,13 +47,16 @@ class ImageCASDataset(Dataset):
             nii_path = os.path.join(self.data_path, 'imagesTr')
             files = [f for f in os.listdir(nii_path) if f.endswith('.img.nii.gz')]
             self.nii_files = [os.path.join(nii_path, file) for file in files]
+            if debug:
+                print("Debug mode enabled. Using only one image and label for training.")
+                self.nii_files = self.nii_files[:1]
             self.drr_axial_path = [file.replace('.img.nii.gz', '_axial.tiff') for file in self.nii_files]
             self.drr_coronal_path = [file.replace('.img.nii.gz', '_coronal.tiff') for file in self.nii_files]
             self.drr_sagittal_path = [file.replace('.img.nii.gz', '_sagittal.tiff') for file in self.nii_files]
 
             nii_path = os.path.join(self.data_path, 'labelsTr')
-            files = [f for f in os.listdir(nii_path) if f.endswith('.label.nii.gz')]
-            self.labels = [os.path.join(nii_path, file) for file in files]
+            self.labels = [file.replace('imagesTr', 'labelsTr') for file in self.nii_files]
+            self.labels = [file.replace('.img.nii.gz', '.label.nii.gz') for file in self.labels]
             self.drr_axial_label_path = [file.replace('.label.nii.gz', '_axial.tiff') for file in self.labels]
             self.drr_coronal_label_path = [file.replace('.label.nii.gz', '_coronal.tiff') for file in self.labels]
             self.drr_sagittal_label_path = [file.replace('.label.nii.gz', '_sagittal.tiff') for file in self.labels]
@@ -62,13 +66,16 @@ class ImageCASDataset(Dataset):
             nii_path = os.path.join(self.data_path, 'imagesTs')
             files = [f for f in os.listdir(nii_path) if f.endswith('.img.nii.gz')]
             self.nii_files = [os.path.join(nii_path, file) for file in files]
+            if debug:
+                print("Debug mode enabled. Using only one image and label for testing.")
+                self.nii_files = self.nii_files[:1]
             self.drr_axial_path = [file.replace('.img.nii.gz', '_axial.tiff') for file in self.nii_files]
             self.drr_coronal_path = [file.replace('.img.nii.gz', '_coronal.tiff') for file in self.nii_files]
             self.drr_sagittal_path = [file.replace('.img.nii.gz', '_sagittal.tiff') for file in self.nii_files]
 
             nii_path = os.path.join(self.data_path, 'labelsTs')
-            files = [f for f in os.listdir(nii_path) if f.endswith('.label.nii.gz')]
-            self.labels = [os.path.join(nii_path, file) for file in files]
+            self.labels = [file.replace('imagesTs', 'labelsTs') for file in self.nii_files]
+            self.labels = [file.replace('.img.nii.gz', '.label.nii.gz') for file in self.labels]
             self.drr_axial_label_path = [file.replace('.label.nii.gz', '_axial.tiff') for file in self.labels]
             self.drr_coronal_label_path = [file.replace('.label.nii.gz', '_coronal.tiff') for file in self.labels]
             self.drr_sagittal_label_path = [file.replace('.label.nii.gz', '_sagittal.tiff') for file in self.labels]

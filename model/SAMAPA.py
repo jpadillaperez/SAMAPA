@@ -54,8 +54,8 @@ class APAEncoder(pl.LightningModule):
         attn = self.partial_attn(input)
         return attn
 
-#-----------------Axial Attention Modules-----------------#
-#TODO: The modules could be the same #DONE
+#-----------------Axes Attention Modules-----------------#
+#DONE: The modules could be the same
 #TODO: We could optimize the number of them by doing DRR on the fly
 
 class APA(pl.LightningModule):
@@ -131,7 +131,7 @@ class InnerBlock(pl.LightningModule):
 
     def forward(self, drr, drr_label):
         #------------------------ SAM Architecture ---------------------------    
-        drr_preprocessed = self.preprocess(drr.squeeze(0))
+        drr_preprocessed = self.preprocess(drr.squeeze(1))
         drr_preprocessed = self.add_three_channels(drr_preprocessed).float()
         drr_label_preprocessed = self.preprocess(drr_label)
 
@@ -240,11 +240,16 @@ class InnerBlock(pl.LightningModule):
 
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
         """Interpolates to a square input """
-        x = F.interpolate(x, (self.image_encoder.img_size, self.image_encoder.img_size), mode="bilinear", align_corners=False)
+        x = F.interpolate(input=x, size=(self.image_encoder.img_size, self.image_encoder.img_size), mode="bilinear", align_corners=False)
+        # Using batch
+        #for b in range(x.shape[0]):
+        #    x[b, :, :] = F.interpolate(input=x[b], size=(self.image_encoder.img_size, self.image_encoder.img_size), mode="bilinear", align_corners=False)
         return x
 
     def add_three_channels(self, x: torch.Tensor) -> torch.Tensor:
         """Add three channels to the input."""
+        # Using batch
+        #x.repeat(1, 1, 3, 1, 1)
         return x.repeat(1, 3, 1, 1)
 
 
@@ -295,10 +300,10 @@ class InnerBlock(pl.LightningModule):
         batch_points = torch.stack(batch_points, dim=0).unsqueeze(0)
         batch_labels = torch.stack(batch_labels, dim=0)
 
-        print("Batch Points: ", batch_points)
-        print("Batch Labels: ", batch_labels)
-        print("Batch Points shape: ", batch_points.shape)
-        print("Batch Labels shape: ", batch_labels.shape)
+        #print("Batch Points: ", batch_points)
+        #print("Batch Labels: ", batch_labels)
+        #print("Batch Points shape: ", batch_points.shape)
+        #print("Batch Labels shape: ", batch_labels.shape)
 
         return batch_points, batch_labels
 
