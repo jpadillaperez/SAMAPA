@@ -5,7 +5,7 @@ import imageio
 import nibabel as nib
 import pandas as pd
 
-from utils import resample_nifti, applyDRR_nifti, applyDRRlabel_nifti
+from utils_preprocess import resample_nifti, applyDRR_nifti, applyDRRlabel_nifti
 
 # Print GPU Info
 print(f"GPU available: {torch.cuda.is_available()}")
@@ -15,7 +15,7 @@ print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024 ** 
 # -------- Preprocessing config --------
 preprocessing_config = {
         "data_raw_path":        '/home/guests/jorge_padilla/data/ImageCAS',
-        "output_folder":        '/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128_angio',
+        "output_folder":        '/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128_angio_iodixanol',
         "split":                1,
         "resample":{
                 "active":       True,

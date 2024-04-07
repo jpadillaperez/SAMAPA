@@ -19,7 +19,7 @@ from model.sam.transformer import TwoWayTransformer
 
 from utils.wandb import save3DImagetoWandb, save2DImagetoWandb
 
-class SAMAPA(pl.LightningModule):
+class SAMAPA_depth(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.save_hyperparameters(config)
@@ -108,26 +108,23 @@ class InnerBlock(pl.LightningModule):
             out_chans = self.prompt_embed_dim,
         )
 
-        self.prompt_encoder = PromptEncoder(
-            embed_dim= self.prompt_embed_dim,
-            image_embedding_size= [self.image_embedding_size, self.image_embedding_size],
-            input_image_size= [self.image_size, self.image_size],
-            mask_in_chans= 16,
+        self.depth_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.prompt_embed_dim, out_channels=self.prompt_embed_dim//2, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=self.prompt_embed_dim//2, out_channels=self.prompt_embed_dim//4, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=self.prompt_embed_dim//4, out_channels=1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid(),
+            nn.Flatten(2, 3),
+            nn.Linear(64*64, 64*64),
+            nn.ReLU(),
+            nn.Linear(64*64, 64*64),
+            nn.ReLU(),
+            nn.Linear(64*64, 64*64),
+            nn.ReLU(),
+            nn.Linear(64*64, 64*64),
+            nn.Unflatten(2, (64, 64))
         )
-
-        self.mask_decoder = MaskDecoder(
-            num_multimask_outputs=3,
-            transformer=TwoWayTransformer(
-                depth=2,
-                embedding_dim=self.prompt_embed_dim,
-                mlp_dim=2048,
-                num_heads=8,
-            ),
-            transformer_dim=self.prompt_embed_dim,
-            iou_head_depth=3,
-            iou_head_hidden_dim=256,
-        )
-
 
     def forward(self, drr, drr_label):
         #------------------------ SAM Architecture ---------------------------    
@@ -136,77 +133,16 @@ class InnerBlock(pl.LightningModule):
         drr_label_preprocessed = self.preprocess(drr_label)
 
         image_embeddings = self.image_encoder(drr_preprocessed)
-        points_input, labels_input = self.get_points(torch.zeros_like(drr_label_preprocessed, dtype=torch.float32, device=drr.device), drr_label_preprocessed, num_points=self.hparams["points_per_iter"])
-
-        prev_mask = None
-        
-        if self.verbose:
-            save2DImagetoWandb(drr_preprocessed[0, 0], f"Input_{self.projection}")
-            save2DImagetoWandb(drr_label_preprocessed[0, 0], f"Target_{self.projection}")
-            save2DImagetoWandb(image_embeddings[0, 0], f"ImageEmbedding_{self.projection}")
-
-            #Create Input with points
-            input_with_points = drr_preprocessed.clone()
-            for point in points_input:
-                #Set 5 pixels around the point to 1
-                input_with_points[0, 0, int(point[0])-2:int(point[0])+3, int(point[1])-2:int(point[1])+3] = 1
-            save2DImagetoWandb(input_with_points[0, 0], f"InputWithPoints_{self.projection}")
-
-        batched_input = {
-            "image": drr_preprocessed,
-            "original_size": drr_preprocessed.shape[-2:],
-            "point_coords": points_input,
-            "point_labels": labels_input,
-        }
-
-        #------------------------ Iteration Prompt and Mask ---------------------------
-        for it in range(self.hparams["max_dec_iter"]):
-            #print("drr_label_preprocessed: ", drr_label_preprocessed.shape)
-            if ((prev_mask is not None) and (it < self.hparams["max_dec_iter"] - 1)):
-                points_input, labels_input = self.get_points(torch.zeros_like(drr_label_preprocessed, dtype=torch.float32, device=drr.device), drr_label_preprocessed, num_points=self.hparams["points_per_iter"])
-                batched_input["point_coords"] = torch.cat((points_input, batched_input["point_coords"]), dim=1)
-                batched_input["point_labels"] = torch.cat((labels_input, batched_input["point_labels"]), dim=1)
-
-            print("Points Input: ", batched_input["point_coords"])
-            print("Labels Input: ", batched_input["point_labels"])
-
-            points = (batched_input["point_coords"], batched_input["point_labels"])
-
-            sparse_embeddings, dense_embeddings = self.prompt_encoder(
-                points=points,
-                boxes=None,
-                masks=prev_mask,
-            )
-            
-            low_res_masks, iou_predictions = self.mask_decoder(
-                image_embeddings=image_embeddings,
-                image_pe=self.prompt_encoder.get_dense_pe(),
-                sparse_prompt_embeddings=sparse_embeddings,
-                dense_prompt_embeddings=dense_embeddings,
-                multimask_output=False, #multimask_output,
-            )
-
-            if self.verbose:
-                save2DImagetoWandb(low_res_masks[0, 0], f"LowResMask_{self.projection}_iter_{it}")
-
-            print("Low Res Mask shape: ", low_res_masks.shape)
-
-            prev_mask = low_res_masks
-
-        prev_mask = self.postprocess_masks(
-            low_res_masks,
-            input_size=(self.image_encoder.img_size, self.image_encoder.img_size),
-            original_size=drr.shape[-2:],
-        )
 
         if self.verbose:
-            save2DImagetoWandb(prev_mask[0, 0], f"Mask_{self.projection}_iter_{it}")
+            save2DImagetoWandb(image_embeddings[0, 0, :, :], "ImageEmbeddings.png")
 
-        print("Prev Mask shape: ", prev_mask.shape)
+        #------------------------ Depth Decoder ---------------------------
+        depth = self.depth_decoder(image_embeddings)
+        depth = self.postprocess_masks(depth, (64, 64), drr.shape[-2:])
+        depth = depth.float()
 
-        final_mask = prev_mask.float()
-
-        return final_mask
+        return depth
 
     #------------------------ Helper Functions ---------------------------
 

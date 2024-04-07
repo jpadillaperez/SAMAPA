@@ -1,22 +1,19 @@
 train_config = {
-        "projection":   "axial",
-        "output_type":  "segmentation", # "segmentation" or "depth_map"
-        "dataset":      "ImageCAS",
-        "data_path":    "/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128_angio",
         "debug":        False,
-        #"loss":         "MSE",
-        "loss":         "DiceCE",
-        "metric":       ["Dice", "Precision", "Recall"],
-        #"metric":       ["SSIM", "PSNR", "RMSE"],
-        "metric":       None,
+        "debug_samples":50,
+        "projection":   "axial",                                #options: "axial", "coronal", "sagittal"
+        "task":         "depth_map",                            #options: "depth_map", "drr"
+        "dataset":      "ImageCAS",                             #options: "ImageCAS", "Task08_HepaticVessel"
+        "loss":         "Huber",                                  #options: "MSE", "DiceCE", "Dice", "Huber"
+        "metric":       None,                                   #options: None, "Dice", "Precision", "Recall", "SSIM", "PSNR", "RMSE"
         "optimizer":    "Adam",
         "lr":           0.0001,
         "lr_scheduler":  {
                 "type":         "StepLR",
-                "step_size":    200,
+                "step_size":    100,
                 "gamma":        0.1
-                },
-        "epochs":       100,
+        },
+        "epochs":       1000,
         "batch_size":   1,
         "num_workers":  1,
         "max_dec_iter": 1,
@@ -26,9 +23,10 @@ train_config = {
         "class_num":    1,
         "val_split":    0.2,
         "val_freq":     5,
-        "verbose":      False,
+        "data_path":    "/home/guests/jorge_padilla/data/ImageCAS/preprocessed_128_angio",
         "output_folder":"/home/guests/jorge_padilla/code/Guided_Research/SAMAPA/output",
-        "SAM_checkpoint":"/home/guests/jorge_padilla/models/SAM/sam_vit_b_01ec64.pth"
+        "SAM_checkpoint":"/home/guests/jorge_padilla/models/SAM/sam_vit_b_01ec64.pth",
+        "verbose":      True
 }
 
 sweep_config = {

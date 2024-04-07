@@ -2,7 +2,7 @@
 #SBATCH --job-name=SAMAPA  # Job name
 #SBATCH --output=output/logs/SAMAPA-%A.out  # Standard output of the script (Can be absolute or relative path). %A adds the job id to the file name so you can launch the same script multiple times and get different logging files
 #SBATCH --error=output/logs/SAMAPA-%A.err  # Standard error of the script
-#SBATCH --time=0-24:00:00  # Limit on the total run time (format: days-hours:minutes:seconds)
+#SBATCH --time=3-24:00:00  # Limit on the total run time (format: days-hours:minutes:seconds)
 #SBATCH --gres=gpu:1 # --gres=gpu:RTX3090:1
 #SBATCH --cpus-per-task=1  # Number of CPUs (Don't use more than 12 per GPU)
 #SBATCH --mem=48G  # Memory in GB (Don't use more than 48G per GPU unless you absolutely need it and know what you are doing)

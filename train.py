@@ -19,6 +19,7 @@ from datasets import ImageCASDataset, HepaticVesselDataset
 from utils.config import train_config
 from utils.wandb import save2DImagetoWandb
 from model.SAMAPA import SAMAPA
+from model.SAMAPA_depth import SAMAPA_depth
 
 class SAMAPA_trainer(pl.LightningModule):
     def __init__(self, config, model, loss_function, metrics):
@@ -51,13 +52,18 @@ class SAMAPA_trainer(pl.LightningModule):
         with autocast():
             output = self(input)
         
-        #targets = input['drr_' + self.hparams["projection"] + '_label']
-        targets = (input['drr_' + self.hparams["projection"] + '_label'] > 0).int()
+        if self.hparams["task"] == "depth_map":
+            targets = input['drr_' + self.hparams["projection"] + '_label'].to(self.hparams["device"])
+            output = output * (input['drr_' + self.hparams["projection"] + '_label'] > 0).float().to(self.hparams["device"])
+        elif self.hparams["task"] == "segmentation":
+            targets = (input['drr_' + self.hparams["projection"] + '_label'] > 0).int().to(self.hparams["device"])
+        
         loss = self.loss_function(output, targets)
 
-        output = (output > 0.8).float()
+        if self.hparams["task"] == "segmentation":
+            output = (output > 0.8).float()
 
-        if (batch_idx == 0 and self.current_epoch % 5 == 0):
+        if batch_idx == 0:
             save2DImagetoWandb(output[0], f"Train_Output")
             save2DImagetoWandb(targets[0], f"Train_Target")
             save2DImagetoWandb(input["drr_" + self.hparams["projection"]], f"Train_DRR")
@@ -83,20 +89,23 @@ class SAMAPA_trainer(pl.LightningModule):
         with autocast():
             output = self(input)
 
-        #targets = input['drr_' + self.hparams["projection"] + '_label']
-        targets = (input['drr_' + self.hparams["projection"] + '_label'] > 0).int().to(self.device)
+        if self.hparams["task"] == "depth_map":
+            targets = input['drr_' + self.hparams["projection"] + '_label'].to(self.hparams["device"])
+            output = output * (input['drr_' + self.hparams["projection"] + '_label'] > 0).float().to(self.hparams["device"])
+        elif self.hparams["task"] == "segmentation":
+            targets = (input['drr_' + self.hparams["projection"] + '_label'] > 0).int().to(self.hparams["device"])
         
         val_loss = self.loss_function(output, targets)
 
         #Iterate over metrics
         for name, func in self.metrics.items():
             score = func(output, targets)
-            #score = func(output.squeeze(0), targets.squeeze(0))
             self.log(f'val_{name}', score, on_step=False, on_epoch=True)
         
-        output = (output > 0.8).float()
+        if self.hparams["task"] == "segmentation":   
+            output = (output > 0.8).float()
 
-        if (batch_idx == 0 and self.current_epoch % 5 == 0):
+        if batch_idx == 0:
             save2DImagetoWandb(output[0], f"Val_Output")
             save2DImagetoWandb(targets[0], f"Val_Target")
             save2DImagetoWandb(input["drr_" + self.hparams["projection"]], f"Val_DRR")
@@ -167,14 +176,15 @@ def main():
 
     # -------- Load data --------
     if train_config["dataset"] == 'ImageCAS':
-        train_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="train", debug=train_config["debug"])
+        train_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="train", debug=train_config["debug"], debug_samples=train_config["debug_samples"])
         if train_config["debug"]:
+            print(f"------------------ Debugging mode enabled. Using same samples for validation as for training.")
             val_dataset = train_dataset
         else:
             train_dataset, val_dataset = random_split(train_dataset, [int((1 - train_config["val_split"]) * len(train_dataset)), int(train_config["val_split"] * len(train_dataset))])
         train_loader = DataLoader(train_dataset, batch_size=train_config["batch_size"], shuffle=True, num_workers=train_config["num_workers"])
         val_loader = DataLoader(val_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=train_config["num_workers"])
-        test_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="test", debug=train_config["debug"])
+        test_dataset = ImageCASDataset(data_path=train_config["data_path"], mode="test", debug=train_config["debug"], debug_samples=train_config["debug_samples"])
         test_loader = DataLoader(test_dataset, batch_size=train_config["batch_size"], shuffle=False, num_workers=train_config["num_workers"])
 
         print("--------- Using ImageCAS dataset")
@@ -188,7 +198,10 @@ def main():
         raise NotImplementedError
 
     # ------- Initialize model --------
-    model = SAMAPA(train_config)
+    if (train_config["task"] == "depth_map"):
+        model = SAMAPA_depth(train_config)
+    elif (train_config["task"] == "segmentation"):
+        model = SAMAPA(train_config)
 
     # -------- Load pretrained SAM --------
     if ((train_config["SAM_checkpoint"] is not None)):
@@ -233,16 +246,22 @@ def main():
     elif train_config["loss"] == 'MSE':
         loss = nn.MSELoss()
         print('--------- Using MSE Loss')
+    elif train_config["loss"] == 'MAE':
+        loss = nn.L1Loss()
+        print('--------- Using MAE Loss')
+    elif train_config["loss"] == 'Huber':
+        loss = nn.HuberLoss()
+        print('--------- Using Huber Loss')
     else:
         raise NotImplementedError
 
     # -------- Metrics --------
     metrics = []
     if train_config["metric"] is None:
-        print(f'--------- No metrics selected, using default for output type {train_config["output_type"]}')
-        if train_config["output_type"] == "depth_map":
+        print(f'--------- No metrics selected, using default for output type {train_config["task"]}')
+        if train_config["task"] == "depth_map":
             train_config["metric"] = ["SSIM", "PSNR", "RMSE"]
-        elif train_config["output_type"] == "segmentation":
+        elif train_config["task"] == "segmentation":
             train_config["metric"] = ["Dice", "Precision", "Recall"]
 
     for metrics_comp in train_config["metric"]:

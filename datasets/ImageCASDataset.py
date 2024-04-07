@@ -19,7 +19,7 @@ dataset_info = {
 }
 
 class ImageCASDataset(Dataset):
-    def __init__(self, data_path, mode="train", debug=False):
+    def __init__(self, data_path, mode="train", debug=False, debug_samples=None):
         """ImageCAS dataset.
 
         Args:
@@ -47,9 +47,9 @@ class ImageCASDataset(Dataset):
             nii_path = os.path.join(self.data_path, 'imagesTr')
             files = [f for f in os.listdir(nii_path) if f.endswith('.img.nii.gz')]
             self.nii_files = [os.path.join(nii_path, file) for file in files]
-            if debug:
-                print("Debug mode enabled. Using only one image and label for training.")
-                self.nii_files = self.nii_files[:1]
+            if debug_samples is not None:
+                print(f"------------------ Debugging mode enabled. Using just {debug_samples} samples for training.")
+                self.nii_files = self.nii_files[:debug_samples]
             self.drr_axial_path = [file.replace('.img.nii.gz', '_axial.tiff') for file in self.nii_files]
             self.drr_coronal_path = [file.replace('.img.nii.gz', '_coronal.tiff') for file in self.nii_files]
             self.drr_sagittal_path = [file.replace('.img.nii.gz', '_sagittal.tiff') for file in self.nii_files]
@@ -66,9 +66,9 @@ class ImageCASDataset(Dataset):
             nii_path = os.path.join(self.data_path, 'imagesTs')
             files = [f for f in os.listdir(nii_path) if f.endswith('.img.nii.gz')]
             self.nii_files = [os.path.join(nii_path, file) for file in files]
-            if debug:
-                print("Debug mode enabled. Using only one image and label for testing.")
-                self.nii_files = self.nii_files[:1]
+            if debug_samples is not None:
+                print(f"------------------ Debugging mode enabled. Using just {debug_samples} samples for testing.")
+                self.nii_files = self.nii_files[:debug_samples]
             self.drr_axial_path = [file.replace('.img.nii.gz', '_axial.tiff') for file in self.nii_files]
             self.drr_coronal_path = [file.replace('.img.nii.gz', '_coronal.tiff') for file in self.nii_files]
             self.drr_sagittal_path = [file.replace('.img.nii.gz', '_sagittal.tiff') for file in self.nii_files]

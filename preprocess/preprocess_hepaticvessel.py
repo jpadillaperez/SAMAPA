@@ -5,7 +5,7 @@ import imageio
 import nibabel as nib
 import pandas as pd
 
-from utils import resample_nifti, applyDRR_nifti, applyDRRlabel_nifti
+from utils_preprocess import resample_nifti, applyDRR_nifti, applyDRRlabel_nifti
 
 # Print GPU Info
 print(f"GPU available: {torch.cuda.is_available()}")
